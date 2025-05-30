@@ -8,7 +8,7 @@ CHUNKSERVERS=4 \
 mkdir "${info[mount0]}/dir"
 saunafs settrashtime 0 "${info[mount0]}/dir"
 
-FILE_SIZE_MB=1024
+FILE_SIZE_MB=1536
 FILE_NAME="${info[mount0]}/dir/network_test_file"
 FILE_NAME_CPY="${FILE_NAME}_cpy"
 touch ${FILE_NAME} ${FILE_NAME_CPY}
@@ -22,7 +22,7 @@ FILE_SIZE=${FILE_SIZE_MB}M file-generate ${FILE_NAME}
 ( dd if=${FILE_NAME} of=${FILE_NAME_CPY} bs=1M count=${FILE_SIZE_MB} status=none ) &
 
 # Allow write to start
-sleep 0.2
+sleep 0.5
 
 # Simulate network partition by stopping master
 echo "Stopping master to simulate network partition."
@@ -34,6 +34,8 @@ sleep 10
 
 saunafs_master_daemon restart
 echo "Done simulating network partition."
+
+saunafs_wait_for_all_ready_chunkservers
 
 # Wait for write to complete
 wait
@@ -55,7 +57,7 @@ rm ${FILE_NAME_CPY}
 ( dd if=${FILE_NAME} of=${FILE_NAME_CPY} bs=1M count=${FILE_SIZE_MB} status=none ) &
 
 # Allow write to start
-sleep 0.2
+sleep 0.5
 
 # Simulate chunkserver failures
 for i in {0..3}; do
@@ -73,6 +75,8 @@ for i in {0..3}; do
 	saunafs_chunkserver_daemon ${i} start
 done
 echo "Done simulating network partition."
+
+saunafs_wait_for_all_ready_chunkservers
 
 # Wait for write to complete
 wait
@@ -94,7 +98,7 @@ rm ${FILE_NAME_CPY}
 ( dd if=${FILE_NAME} of=${FILE_NAME_CPY} bs=1M count=${FILE_SIZE_MB} status=none ) &
 
 # Allow write to start
-sleep 0.2
+sleep 0.5
 
 # Simulate master and chunkserver failures
 echo "Stopping master to simulate network partition."
@@ -115,6 +119,8 @@ for i in {0..3}; do
 done
 saunafs_master_daemon restart
 echo "Done simulating network partition."
+
+saunafs_wait_for_all_ready_chunkservers
 
 # Wait for write to complete
 wait
