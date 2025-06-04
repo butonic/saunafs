@@ -46,6 +46,8 @@ else
     test_add_failure "Write failed unexpectedly during network partition."
 fi
 
+sleep 1
+
 assert_success file-validate ${FILE_NAME_CPY}
 echo "Write continues after master crashed and restarted: OK"
 
@@ -86,6 +88,8 @@ if [ $? -eq 0 ]; then
 else
     test_add_failure "Write failed unexpectedly during network partition."
 fi
+
+sleep 1
 
 assert_success file-validate ${FILE_NAME_CPY}
 echo "Write continues after chunkservers crashed and restarted: OK"
@@ -130,6 +134,8 @@ if [ $? -eq 0 ]; then
 else
     test_add_failure "Write failed unexpectedly during network partition."
 fi
+
+sleep 1
 
 assert_success file-validate ${FILE_NAME_CPY}
 echo "Write continues after chunkservers and master crashed and restarted: OK"

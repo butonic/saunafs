@@ -1982,6 +1982,9 @@ static int write_data_flush(void *vid, Lock &globalLock) {
 	write_data_flushwaiting_decrease(id, inodeLock);
 	inodeLock.unlock();
 
+	safs::log_warn("DAVE: write_data_flush: inode {} flushed, status: {}, new size: {}",
+	               id->inode, saunafs_error_string(id->status), id->maxfleng);
+
 	globalLock.lock();
 	return id->status;
 }
