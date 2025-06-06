@@ -105,7 +105,6 @@ void WriteChunkLocator::locateAndLockChunk(inode_t inode, uint32_t index) {
 				|| status == SAUNAFS_ERROR_NOCHUNKSERVERS
 				|| status == SAUNAFS_ERROR_LOCKED
 				|| status == SAUNAFS_ERROR_CHUNKBUSY
-				|| status == SAUNAFS_ERROR_NOTDONE
 				|| status == SAUNAFS_ERROR_CHUNKLOST) {
 			throw RecoverableWriteException("error sent by master server", status);
 		} else {

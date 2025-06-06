@@ -61,6 +61,7 @@
 #include "master/goal_cache.h"
 #include "metrics/metrics.h"
 #include "protocol/SFSCommunication.h"
+#include "slogger/slogger.h"
 
 #ifdef METARESTORE
 #  include <ctime>
@@ -823,6 +824,7 @@ void chunk_handle_disconnected_copies(Chunk *c) {
 				chunk_emergency_increase_version(c);
 			} else {
 				matoclserv_chunk_status(c->chunkid,SAUNAFS_ERROR_NOTDONE);
+				safs::log_warn("DAVE: chunk_handle_disconnected_copies having SAUNAFS_ERROR_NOTDONE");
 				c->operation = Chunk::NONE;
 			}
 		}
@@ -1754,6 +1756,7 @@ void chunk_operation_status(Chunk *c, ChunkPartType chunkType, uint8_t status,ma
 			}
 		} else {
 			matoclserv_chunk_status(c->chunkid,SAUNAFS_ERROR_NOTDONE);
+			safs::log_warn("DAVE: chunk_operation_status having SAUNAFS_ERROR_NOTDONE");
 			c->operation = Chunk::NONE;
 		}
 	}
@@ -1765,6 +1768,7 @@ void chunk_got_create_status(matocsserventry *ptr,uint64_t chunkId, ChunkPartTyp
 	if (c==NULL) {
 		return ;
 	}
+	safs::log_warn("DAVE: from chunk_got_create_status going to chunk_operation_status");
 	chunk_operation_status(c, chunkType, status, ptr);
 }
 

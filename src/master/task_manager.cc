@@ -22,6 +22,7 @@
 #include "master/task_manager.h"
 
 #include "common/loop_watchdog.h"
+#include "slogger/slogger.h"
 
 void TaskManager::Job::finalize(int status) {
 	if (finish_callback_) {
@@ -119,6 +120,7 @@ bool TaskManager::cancelJob(uint32_t job_id) {
 	for (auto it = job_list_.begin(); it != job_list_.end(); ++it) {
 		if (it->getId() == job_id) {
 			it->finalize(SAUNAFS_ERROR_NOTDONE);
+			safs::log_warn("DAVE: TaskManager::cancelJob having SAUNAFS_ERROR_NOTDONE");
 			return true;
 		}
 	}
