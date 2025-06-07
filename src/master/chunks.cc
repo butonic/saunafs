@@ -370,7 +370,7 @@ public:
 	}
 
 	// Updates statistics of all chunks
-	void updateStats(bool remove_from_stats = true) {
+	void updateStats(bool remove_from_stats = true, bool printSomething = false) {
 		int oldAllMissingParts = allMissingParts_;
 
 		if (remove_from_stats) {
@@ -391,6 +391,10 @@ public:
 		all.optimize(gUseLinearAssignmentOptimizer, &gLinearAssignmentCache);
 
 		allFullCopies_ = std::min(kMaxStatCount, all.getFullCopiesCount());
+		if (printSomething) {
+			safs::log_warn("DAVE: current redundancy level: {}, target redundancy level: {}",
+			               all.getRedundancyLevel(), all.getTargetRedundancyLevel());
+		}
 		allAvailabilityState_ = all.getState();
 		allMissingParts_ = std::min(kMaxStatCount, all.countPartsToRecover());
 		allRedundantParts_ = std::min(kMaxStatCount, all.countPartsToRemove());
@@ -808,9 +812,12 @@ void chunk_handle_disconnected_copies(Chunk *c) {
 	bool lost_copy_found = it != c->parts.end();
 
 	if (lost_copy_found) {
+		auto prevsize = c->parts.size();
 		c->parts.erase(it, c->parts.end());
+		auto newsize = c->parts.size();
 		c->needverincrease = 1;
-		c->updateStats();
+		c->updateStats(true, true);
+		safs::log_warn("DAVE: previous size {}, new size {}", prevsize, newsize);
 	}
 
 	if (lost_copy_found && c->operation != Chunk::NONE) {

@@ -216,6 +216,10 @@ public:
 		return redundancy_level_;
 	}
 
+	int getTargetRedundancyLevel() const {
+		return target_redundancy_level_;
+	}
+
 	/*! \brief Return chunk state. */
 	ChunksAvailabilityState::State getState() const {
 		if (target_.size() == 0 || redundancy_level_ > 0) {
