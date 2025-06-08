@@ -817,7 +817,8 @@ void chunk_handle_disconnected_copies(Chunk *c) {
 		auto newsize = c->parts.size();
 		c->needverincrease = 1;
 		c->updateStats(true, true);
-		safs::log_warn("DAVE: previous size {}, new size {}", prevsize, newsize);
+		safs::log_warn("DAVE: previous size {}, new size {}, goal {}, isLost {}", prevsize, newsize,
+		               c->getGoal().getName(), c->isLost());
 	}
 
 	if (lost_copy_found && c->operation != Chunk::NONE) {
