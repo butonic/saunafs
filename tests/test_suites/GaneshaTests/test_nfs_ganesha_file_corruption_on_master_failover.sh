@@ -7,15 +7,15 @@
 # The path for the Ganesha daemon should match the installation folder inside the test.
 #
 
-timeout_set 2 minutes
+timeout_set 5 minutes
 
 CHUNKSERVERS=3 \
-	USE_RAMDISK=YES \
+	#USE_RAMDISK=YES \
 	MOUNT_EXTRA_CONFIG="sfscachemode=NEVER" \
 	CHUNKSERVER_EXTRA_CONFIG="READ_AHEAD_KB = 1024|MAX_READ_BEHIND_KB = 2048"
 	setup_local_empty_saunafs info
 
-grace_period=15
+grace_period=10
 delta=5
 
 test_error_cleanup() {
@@ -70,7 +70,7 @@ EXPORT {
 EOF
 
 # Create a file for testing with checksum
-head -c 100M /dev/urandom | tee "${TEMP_DIR}/test_file" > /dev/null
+head -c 4G /dev/urandom | tee "${TEMP_DIR}/test_file" > /dev/null
 
 sudo /usr/bin/ganesha.nfsd -f "${info[mount0]}/ganesha.conf"
 
@@ -79,15 +79,20 @@ sudo mount -vvvv localhost:/ "${TEMP_DIR}/mnt/ganesha"
 
 # Restart master server after 15 seconds
 (
-	sleep 15
-	assert_success saunafs_master_daemon restart
+	while true; do
+		sleep 15
+		echo "Master about to restart"
+		assert_success saunafs_master_daemon restart
+		echo "Master restarted"
+	done
 ) &
 
 # Wait for Grace period so NFS Ganesha server will be ready
-sleep $((grace_period + delta))
+sleep $((grace_period))
 
-# Copy the file after master restart
+echo "Copy the file while the master restarts"
 cp "${TEMP_DIR}/test_file" "$TEMP_DIR/mnt/ganesha/test_file"
+echo "File copy finished."
 
 # Get checksums
 checksum1=$(get_checksum "${TEMP_DIR}/test_file")

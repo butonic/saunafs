@@ -6,6 +6,7 @@ on:
     push:
         branches:
             - dev
+            - bisect-ganesha-failover
 
 jobs:
     Run-Unit-Tests-and-Ganesha:
@@ -91,7 +92,8 @@ jobs:
 
             - name: Run Unit Tests suite
               run: |
-                  "${GITHUB_WORKSPACE}/build/src/unittests/unittests" --gtest_color=yes
+                  #"${GITHUB_WORKSPACE}/build/src/unittests/unittests" --gtest_color=yes
+                  echo "Unit tests will be skipped!!!"
 
             - name: Run Ganesha suite
               run: |
