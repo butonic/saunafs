@@ -1,4 +1,5 @@
 configure_file(sfsmaster.cfg.in sfsmaster.cfg)
+configure_file(sfsmds.cfg.in sfsmds.cfg)
 configure_file(sfschunkserver.cfg.in sfschunkserver.cfg)
 configure_file(sfsmetalogger.cfg.in sfsmetalogger.cfg)
 configure_file(postinst.in postinst)
@@ -14,6 +15,7 @@ install(FILES sfstopology.cfg                                DESTINATION ${SFSMA
 install(FILES sfsglobaliolimits.cfg                             DESTINATION ${SFSMASTER_EXAMPLES_SUBDIR})
 install(FILES saunafs-uraft.cfg                             DESTINATION ${URAFT_EXAMPLES_SUBDIR})
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/sfsmaster.cfg      DESTINATION ${SFSMASTER_EXAMPLES_SUBDIR})
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/sfsmds.cfg         DESTINATION ${SFSMDS_EXAMPLES_SUBDIR})
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/sfschunkserver.cfg DESTINATION ${CHUNKSERVER_EXAMPLES_SUBDIR})
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/sfsmetalogger.cfg  DESTINATION ${METALOGGER_EXAMPLES_SUBDIR})
 

@@ -207,7 +207,8 @@ void fs_term(const char *fname, bool noLock) {
 #endif
 
 void fs_strinit(void) {
-	gMetadata = new FilesystemMetadata;
+	// TODO(GUILLEX): This is not correct for Shadows, don't forget
+	if (gMetadata == nullptr) { gMetadata = new FilesystemMetadata; }
 }
 
 /* executed in master mode */
