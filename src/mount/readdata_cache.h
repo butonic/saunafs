@@ -274,6 +274,13 @@ public:
 			entries.push_back(std::addressof(entry));
 		}
 
+		bool isValid(Offset real_offset) const {
+			if (entries.empty() || real_offset < frontOffset() || real_offset > endOffset()) {
+				return false;
+			}
+			return true;
+		}
+
 		Size requestSize(Offset real_offset, Size real_size) const {
 			if (entries.empty()) {
 				return 0;
