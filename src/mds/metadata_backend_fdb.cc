@@ -28,37 +28,36 @@
 #include <memory>
 #include <optional>
 
-#include <common/cwrap.h>
-#include <common/event_loop.h>
-#include <common/rotate_files.h>
-#include <common/saunafs_version.h>
-#include <common/setup.h>
-#include <common/type_defs.h>
-#include <master/changelog.h>
-#include <master/chunks.h>
-#include <master/filesystem.h>
-#include <master/filesystem_metadata.h>
-#include <master/filesystem_node.h>
-#include <master/filesystem_operations.h>
-#include <master/filesystem_quota.h>
-#include <master/filesystem_store_acl.h>
-#include <master/matoclserv.h>
-#include <master/matomlserv.h>
-#include <master/metadata_backend_common.h>
-#include <master/restore.h>
-#include <mds/metadata_dumper_fdb.h>
-#include <slogger/slogger.h>
+#include "common/event_loop.h"
 #include "common/serialization.h"
+#include "common/type_defs.h"
+#include "config/cfg.h"
 #include "fdb/fdb_context.h"
 #include "fdb/fdb_kv_engine.h"
 #include "kv/itransaction.h"
+#include "master/changelog.h"
+#include "master/chunks.h"
+#include "master/filesystem.h"
+#include "master/filesystem_metadata.h"
+#include "master/filesystem_node_types.h"
+#include "master/filesystem_operations.h"
+#include "master/filesystem_quota.h"
+#include "master/matoclserv.h"
+#include "master/matomlserv.h"
+#include "mds/metadata_dumper_fdb.h"
+#include "slogger/slogger.h"
 
 MetadataBackendFDB::MetadataBackendFDB()
 #if !defined(METARESTORE) && !defined(METALOGGER)
     : dumper_(std::make_unique<MetadataDumperFDB>())
 #endif  // #if !defined(METARESTORE) && !defined(METALOGGER)
 {
-	std::string clusterFile = "/etc/foundationdb/fdb.cluster";
+	std::string clusterFile = cfg_getstring("FDB_CLUSTER_FILE", "");
+
+	if (clusterFile.empty()) {
+		safs::log_err("FDB_CLUSTER_FILE is not set, cannot initialize FoundationDB");
+		throw std::runtime_error("FDB_CLUSTER_FILE is not set");
+	}
 
 	if (!initFoundationDB(clusterFile)) {
 		safs::log_err("Failed to initialize FoundationDB with cluster file: {}", clusterFile);
@@ -88,6 +87,8 @@ void MetadataBackendFDB::broadcast_metadata_saved(uint8_t status) {
 }
 
 uint8_t MetadataBackendFDB::fs_storeall(DumpType dumpType) {
+	safs::log_err("GUILLEX: MetadataBackendFDB::fs_storeall");
+
 	if (gMetadata == nullptr) {
 		// Periodic dump in shadow master or a request from saunafs-admin
 		safs_pretty_syslog(LOG_INFO, "Can't save metadata because no metadata is loaded");
@@ -147,7 +148,7 @@ void fs_new(void) {
 	gMetadata->metadataVersion = 1;
 	gMetadata->nextSessionId = 1;
 
-	auto *rootDirectory = FSNode::create(FSNode::kDirectory);
+	auto *rootDirectory = FSNode::create(FSNodeType::kDirectory);
 	gMetadata->root = static_cast<FSNodeDirectory *>(rootDirectory);
 	gMetadata->root->id = SPECIAL_INODE_ROOT;
 	gMetadata->root->atime = eventloop_time();

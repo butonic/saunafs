@@ -3,9 +3,9 @@ CHUNKSERVERS=1 \
 	USE_RAMDISK=YES \
 	MOUNT_EXTRA_CONFIG="sfscachemode=NEVER" \
 	CHUNKSERVER_EXTRA_CONFIG="GARBAGE_COLLECTION_FREQ_MS = 0|HDD_TEST_FREQ = 100000" \
-	AUTO_SHADOW_MASTER="NO" \
+	SFSEXPORTS_EXTRA_OPTIONS="allcanchangequota,ignoregid" \
 	setup_local_empty_saunafs info
 
 cd "${info[mount0]}"
 
-assert_success sfs-test-fdb "/tmp/saunafs-fdb-test/conf/fdb.cluster"
+metadata_generate_all
