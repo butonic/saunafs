@@ -549,7 +549,7 @@ struct ChunksMetadata {
 };
 } // anonymous namespace
 
-static ChunksMetadata *gChunksMetadata;
+static std::unique_ptr<ChunksMetadata> gChunksMetadata;
 
 #define LOCKTIMEOUT 120
 #define UNUSED_DELETE_TIMEOUT (86400*7)
@@ -2811,8 +2811,7 @@ void chunk_store(FILE *fd) {
 }
 
 void chunk_unload() {
-	delete gChunksMetadata;
-	gChunksMetadata = nullptr;
+	gChunksMetadata.reset();
 }
 
 void chunk_newfs() {
@@ -2917,8 +2916,8 @@ void chunk_reload() {
 }
 #endif
 
-int chunk_strinit(void) {
-	gChunksMetadata = new ChunksMetadata;
+int chunk_strinit() {
+	gChunksMetadata = std::make_unique<ChunksMetadata>();
 
 #ifndef METARESTORE
 	Chunk::count = 0;
