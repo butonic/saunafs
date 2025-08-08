@@ -1,9 +1,7 @@
 /*
-   Copyright 2005-2010 Jakub Kruszona-Zawadzki, Gemius SA
-   Copyright 2013-2014 EditShare
-   Copyright 2013-2015 Skytechnology sp. z o.o.
    Copyright 2023      Leil Storage OÜ
 
+   This file is part of SaunaFS.
 
    SaunaFS is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -28,6 +26,7 @@
 #include <memory>
 #include <optional>
 
+#include "common/datapack.h"
 #include "common/event_loop.h"
 #include "common/serialization.h"
 #include "common/type_defs.h"
@@ -144,9 +143,9 @@ void MetadataBackendFDB::store_fd(FILE *fd) {
 
 // TODO(guillex): de-duplicate this function implementation (it is in MetadataBackendFile as well)
 void fs_new(void) {
-	gMetadata->maxInodeId = SPECIAL_INODE_ROOT;
+	gMetadata->maxInodeId().setValue(SPECIAL_INODE_ROOT);
 	gMetadata->metadataVersion = 1;
-	gMetadata->nextSessionId = 1;
+	gMetadata->nextSessionId().setValue(1);
 
 	auto *rootDirectory = FSNode::create(FSNodeType::kDirectory);
 	gMetadata->root = static_cast<FSNodeDirectory *>(rootDirectory);
@@ -203,6 +202,8 @@ void MetadataBackendFDB::init() {
 	fs_new();  // Initialize the metadata structure
 
 	safs::log_info("Metadata version: {}", version);
+
+	createConnections();
 }
 
 uint64_t MetadataBackendFDB::getVersion(const std::string & /*file*/) {
@@ -243,4 +244,64 @@ bool MetadataBackendFDB::initFoundationDB(const std::string &clusterFile) {
 	}
 
 	return true;
+}
+
+void MetadataBackendFDB::createConnections() {
+	gMetadata->nextSessionId().connect([this](uint32_t oldSessionId, uint32_t newSessionId) {
+		(void)oldSessionId;  // Unused parameter
+
+		auto transaction = kvEngine_->createReadWriteTransaction();
+		kv::Key sessionKey{kv::toU8Vector(gMetadata->nextSessionId().getName())};
+		kv::Value sessionValue;
+		serialize(sessionValue, newSessionId);
+		transaction->set(sessionKey, sessionValue);
+
+		if (!transaction->commit()) {
+			safs::log_err("Failed to store session ID: {}", newSessionId);
+		}
+	});
+
+	gMetadata->maxInodeId().connect([this](inode_t oldMaxInodeId, inode_t newMaxInodeId) {
+		(void)oldMaxInodeId;  // Unused parameter
+
+		auto transaction = kvEngine_->createReadWriteTransaction();
+		kv::Key maxInodeKey{kv::toU8Vector(gMetadata->maxInodeId().getName())};
+		kv::Value maxInodeValue;
+		serialize(maxInodeValue, newMaxInodeId);
+		transaction->set(maxInodeKey, maxInodeValue);
+
+		if (!transaction->commit()) {
+			safs::log_err("Failed to store max inode ID: {}", newMaxInodeId);
+		}
+	});
+
+	getChangelogSignal().connect([this](const ChangelogEvent &event) {
+		static constexpr uint8_t kLogPrefixSize = 4;
+		static kv::Key logKey{'L', 'O', 'G', '_', 'V', 'E', 'R', 'S', 'I', 'O', 'N', '_'};
+		uint8_t *ptr = logKey.data() + kLogPrefixSize;
+		put64bit(&ptr, event.version);
+
+		// The log itself
+		auto transaction = kvEngine_->createReadWriteTransaction();
+		transaction->set(logKey, kv::toU8Vector(event.entry));
+
+		// Then update the metadata version
+		kv::Value serializedVersion;
+		serialize(serializedVersion, event.version);
+		transaction->set(kv::toU8Vector("META_VERSION"), serializedVersion);
+
+		if (!transaction->commit()) {
+			safs::log_err("Failed to store changelog entry: {}", event.entry);
+			return;
+		}
+
+		auto committedVersion = transaction->getCommittedVersion();
+
+		if (committedVersion.has_value()) {
+			safs::log_info("Commit: {}: {}|{}", committedVersion.value(), event.version,
+			               event.entry);
+		} else {
+			safs::log_err("Changelog entry committed but version is not available");
+		}
+	});
 }

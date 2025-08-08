@@ -1,9 +1,7 @@
 /*
-   Copyright 2005-2010 Jakub Kruszona-Zawadzki, Gemius SA
-   Copyright 2013-2014 EditShare
-   Copyright 2013-2015 Skytechnology sp. z o.o.
    Copyright 2023      Leil Storage OÜ
 
+   This file is part of SaunaFS.
 
    SaunaFS is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -81,6 +79,9 @@ private:
 #endif  // #ifndef METARESTORE
 
 	bool initFoundationDB(const std::string &clusterFile);
+
+	///  Registers observers/watchers on selected metadata properties
+	void createConnections();
 
 	std::shared_ptr<fdb::FDBContext> fdbContext_;
 	std::shared_ptr<kv::IKVEngine> kvEngine_;
