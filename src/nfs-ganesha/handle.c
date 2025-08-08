@@ -1526,7 +1526,7 @@ fsal_status_t lock_op2(struct fsal_obj_handle *objectHandle, struct state_t *sta
 	export = container_of(op_ctx->fsal_export, struct SaunaFSExport, export);
 	handle = container_of(objectHandle, struct SaunaFSHandle, handle);
 
-	LogFullDebug(COMPONENT_FSAL, "op:%d type:%d start:%" PRIu64 " length:%" PRIu64 " ",
+	LogFullDebug(COMPONENT_FSAL, "Locking: op:%d type:%d start:%" PRIu64 " length:%" PRIu64 " ",
 	             lockOperation, requestedLock->lock_type, requestedLock->lock_start,
 	             requestedLock->lock_length);
 
@@ -1537,6 +1537,11 @@ fsal_status_t lock_op2(struct fsal_obj_handle *objectHandle, struct state_t *sta
 
 	if (owner == NULL) {
 		LogCrit(COMPONENT_FSAL, "owner arg is NULL.");
+		return fsalstat(ERR_FSAL_FAULT, 0);
+	}
+
+	if (conflictingLock == NULL && lockOperation == FSAL_OP_LOCKT) {
+		LogDebug(COMPONENT_FSAL, "conflictingLock argument can't be NULL for operation LOCKT");
 		return fsalstat(ERR_FSAL_FAULT, 0);
 	}
 
@@ -1570,7 +1575,6 @@ fsal_status_t lock_op2(struct fsal_obj_handle *objectHandle, struct state_t *sta
 		lockInfo.l_type = F_WRLCK;
 	} else {
 		LogFullDebug(COMPONENT_FSAL, "ERROR: The requested lock type was not read or write.");
-
 		return fsalstat(ERR_FSAL_NOTSUPP, 0);
 	}
 
@@ -1581,6 +1585,16 @@ fsal_status_t lock_op2(struct fsal_obj_handle *objectHandle, struct state_t *sta
 	lockInfo.l_pid = 0;
 	lockInfo.l_len = requestedLock->lock_length;
 	lockInfo.l_start = requestedLock->lock_start;
+
+	// Prevent locking an unintended range in case requested lock length is too large and mapped
+	// to negative values, as POSIX locks can accept negative l_len values.
+	if (lockInfo.l_len < 0) {
+		LogCrit(COMPONENT_FSAL,
+		        "Requested lock length is out of range - lockInfo.l_len(%lu), "
+		        "requested length(%" PRIu64 ")",
+		        lockInfo.l_len, requestedLock->lock_length);
+		return fsalstat(ERR_FSAL_BAD_RANGE, 0);
+	}
 
 	// Indicate a desire to start io and get a usable file descritor
 	status = fsal_start_io(&outFileDescriptor, objectHandle, &handle->fd.fsalFd,
@@ -1629,7 +1643,6 @@ fsal_status_t lock_op2(struct fsal_obj_handle *objectHandle, struct state_t *sta
 
 		if (state == NULL) {
 			// We did I/O without a state so we need to release the temp share reservation acquired.
-
 			// Release the share reservation now by updating the counters.
 			update_share_counters_locked(objectHandle, &handle->share, openflags, FSAL_O_CLOSED);
 		}
@@ -1650,14 +1663,12 @@ fsal_status_t lock_op2(struct fsal_obj_handle *objectHandle, struct state_t *sta
 		}
 	}
 
-	lastError = sau_last_err();
 	status2 = fsal_complete_io(objectHandle, outFileDescriptor);
 
 	LogFullDebug(COMPONENT_FSAL, "fsal_complete_io returned %s", fsal_err_txt(status2));
 
 	if (state == NULL) {
 		// We did I/O without a state so we need to release the temp share reservation acquired.
-
 		// Release the share reservation now by updating the counters.
 		update_share_counters_locked(objectHandle, &handle->share, openflags, FSAL_O_CLOSED);
 	}
