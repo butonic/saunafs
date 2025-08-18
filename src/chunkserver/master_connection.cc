@@ -683,6 +683,7 @@ void MasterConn::sauJobFinished(uint8_t status, void *packet) {
 
 void MasterConn::releaseResources() {
 	if (mode_ != ConnectionMode::FREE && mode_ != ConnectionMode::CONNECTING) {
+		writeToSocket();
 		tcpclose(socketFD_);
 		inputPacket_.reset();
 	}

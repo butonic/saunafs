@@ -140,14 +140,14 @@ void masterconn_unwantedjobfinished(uint8_t status, void *packet) {
 }
 
 void masterconn_term(void) {
+	//  Now reset the last reference to the job pools.
+	gReplicationJobPool.reset();
+	gJobPool.reset();
+
 	//  For each connection (currently only one), release its resources.
 	MasterConn *eptr = gMasterConnSingleton.get();
 	eptr->releaseResources();
 	gMasterConnSingleton.reset();
-
-	//  Now reset the last reference to the job pools.
-	gReplicationJobPool.reset();
-	gJobPool.reset();
 }
 
 void masterconn_desc(std::vector<pollfd> &pdesc) {
