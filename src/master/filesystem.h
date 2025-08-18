@@ -35,6 +35,7 @@
 #include "common/type_defs.h"
 #include "master/checksum.h"
 #include "master/fs_context.h"
+#include "protocol/handle_inode_entry.h"
 #include "master/hstring.h"
 #include "master/setgoal_task.h"
 #include "master/settrashtime_task.h"
@@ -234,11 +235,15 @@ uint32_t fs_newsessionid(void);
 uint8_t fs_readreserved_size(inode_t rootinode, uint8_t sesflags, uint32_t *dbuffsize);
 void fs_readreserved_data(inode_t rootinode, uint8_t sesflags, uint8_t *dbuff);
 void fs_readreserved(uint32_t off, uint32_t max_entries, std::vector<NamedInodeEntry> &entries);
+void fs_readreserved(uint64_t handleOffset, uint32_t maxEntries,
+                     std::vector<HandleInodeEntry> &entries);
 
 // TRASH
 uint8_t fs_readtrash_size(inode_t rootinode, uint8_t sesflags, uint32_t *dbuffsize);
 void fs_readtrash_data(inode_t rootinode, uint8_t sesflags, uint8_t *dbuff);
 void fs_readtrash(uint32_t off, uint32_t max_entries, std::vector<NamedInodeEntry> &entries);
+void fs_readtrash(uint64_t handleOffset, uint32_t maxEntries,
+                  std::vector<HandleInodeEntry> &entries);
 uint8_t fs_gettrashpath(inode_t rootinode, uint8_t sesflags, inode_t inode, std::string &path);
 
 // RESERVED+TRASH

@@ -133,6 +133,11 @@ void fs_readreserved(uint32_t off, uint32_t max_entries, std::vector<NamedInodeE
 	fsnodes_getdetacheddata(gMetadata->reserved, off, max_entries, entries);
 }
 
+void fs_readreserved(uint64_t handleOffset, uint32_t maxEntries,
+                     std::vector<HandleInodeEntry> &entries) {
+	fsnodes_getdetacheddata(gMetadata->reservedHandlesIndex, handleOffset, maxEntries, entries);
+}
+
 uint8_t fs_readtrash_size(inode_t rootinode, uint8_t sesflags, uint32_t *dbuffsize) {
 	if (rootinode != 0) {
 		return SAUNAFS_ERROR_EPERM;
@@ -150,6 +155,11 @@ void fs_readtrash_data(inode_t rootinode, uint8_t sesflags, uint8_t *dbuff) {
 
 void fs_readtrash(uint32_t off, uint32_t max_entries, std::vector<NamedInodeEntry> &entries) {
 	fsnodes_getdetacheddata(gMetadata->trash, off, max_entries, entries);
+}
+
+void fs_readtrash(uint64_t handleOffset, uint32_t maxEntries,
+                  std::vector<HandleInodeEntry> &entries) {
+	fsnodes_getdetacheddata(gMetadata->trashHandlesIndex, handleOffset, maxEntries, entries);
 }
 
 /* common procedure for trash and reserved files */
