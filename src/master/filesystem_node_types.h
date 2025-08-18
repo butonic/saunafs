@@ -574,3 +574,24 @@ using ReservedPathContainer = judy_map<inode_t, hstorage::Handle>;
 #else
 using ReservedPathContainer = std::map<inode_t, hstorage::Handle>;
 #endif
+
+struct HandleIndexKey {
+	uint64_t data;
+	std::string name;
+
+	HandleIndexKey(uint64_t d, const std::string &n) : data(d), name(n) {}
+
+	// For map lookup, you may want operator< or a custom comparator
+	bool operator<(const HandleIndexKey &other) const {
+		// Compare by data first, then by name if needed
+		if ((data & ~(1ULL << 63ULL)) != (other.data & ~(1ULL << 63ULL))) {
+			return (data & ~(1ULL << 63ULL)) < (other.data & ~(1ULL << 63ULL));
+		}
+		return name < other.name;
+	}
+};
+
+// Auxiliary index for Trash/Reserved entries, ordered by HandleIndexKey
+// Used for readdir batching from meta mountpoints: lower_bound / upper_bound
+// on Handle offset and retrieving the next N entries. Each handle maps to an inode_t.
+using HandleIndexContainer = std::map<HandleIndexKey, inode_t>;

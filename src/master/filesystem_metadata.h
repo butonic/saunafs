@@ -56,7 +56,9 @@ public:
 	IdPoolDetainer<inode_t, uint32_t> inodePool;
 	AclStorage aclStorage;
 	TrashPathContainer trash;
+	HandleIndexContainer trashHandlesIndex;
 	ReservedPathContainer reserved;
+	HandleIndexContainer reservedHandlesIndex;
 	FSNodeDirectory *root{};
 	std::array<FSNodePointerVector, NODEHASHSIZE> nodeHash;
 	Signal<FSNode *> nodeChangedSignal;  ///< Signal emitted when a node changes

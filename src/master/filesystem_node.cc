@@ -814,6 +814,26 @@ void fsnodes_getdetacheddata(const TrashPathContainer &data, uint32_t off, uint3
 	}
 }
 
+// This function returns entries from a HandleIndexContainer starting at a given handleOffset.
+// The offset provided by the client (e.g., FUSE readdir) is always non-negative (sign bit 0).
+// Internally, the server may store offsets with the sign bit set (bit 63 = 1).
+// All lookups are enforced to be done ignoring the sign bit by setting it to 0.
+void fsnodes_getdetacheddata(const HandleIndexContainer &data, uint64_t handleOffset,
+                             uint32_t maxEntries, std::vector<HandleInodeEntry> &entries) {
+	constexpr uint64_t SIGN_BIT_64 = 1ULL << 63ULL;
+	uint64_t start = (handleOffset & ~SIGN_BIT_64);
+	auto it = data.lower_bound(HandleIndexKey(start, std::string("")));
+
+	for (; maxEntries > 0 && it != data.end(); --maxEntries, ++it) {
+		// Ensure we only return entries with the sign bit cleared
+		// to the client to avoid sending negative offsets to fuse
+		// when requesting next one
+		uint64_t handleValueForClient = (*it).first.data & ~SIGN_BIT_64;
+		entries.emplace_back(handleValueForClient, (*it).first.name,
+		                     (*it).second);
+	}
+}
+
 uint32_t fsnodes_getdetachedsize(const ReservedPathContainer &data) {
 	return getdetachedsize(data);
 }
@@ -1358,6 +1378,10 @@ void fsnodes_unlink(uint32_t ts, FSNodeDirectory *parent, const HString &child_n
 			fsnodes_update_checksum(child);
 
 			gMetadata->trash.insert({TrashPathKey(child), hstorage::Handle(path)});
+			gMetadata->trashHandlesIndex.insert(
+			    {HandleIndexKey(gMetadata->trash.at(TrashPathKey(child)).data(),
+			                    gMetadata->trash.at(TrashPathKey(child)).get()),
+			     child->id});
 
 			gMetadata->trashSpace += file_node->length;
 			gMetadata->trashNodes++;
@@ -1366,6 +1390,8 @@ void fsnodes_unlink(uint32_t ts, FSNodeDirectory *parent, const HString &child_n
 			fsnodes_update_checksum(child);
 
 			gMetadata->reserved.insert({child->id, hstorage::Handle(path)});
+			gMetadata->reservedHandlesIndex.insert(
+			    {HandleIndexKey(gMetadata->reserved.at(child->id).data(), path), child->id});
 
 			gMetadata->reservedSpace += file_node->length;
 			gMetadata->reservedNodes++;
@@ -1388,13 +1414,24 @@ int fsnodes_purge(uint32_t ts, FSNode *p) {
 			fsnodes_update_checksum(file_node);
 			gMetadata->reservedSpace += file_node->length;
 			gMetadata->reservedNodes++;
+
+			gMetadata->trashHandlesIndex.erase(
+			    HandleIndexKey(gMetadata->trash.at(TrashPathKey(p)).data(),
+			                   gMetadata->trash.at(TrashPathKey(p)).get()));
+			uint64_t handleData = gMetadata->trash.at(TrashPathKey(p)).data();
+			std::string handleName = gMetadata->trash.at(TrashPathKey(p)).get();
 			hstorage::Handle name_handle = std::move(gMetadata->trash.at(TrashPathKey(p)));
 			gMetadata->trash.erase(TrashPathKey(p));
 
 			gMetadata->reserved.insert({file_node->id, std::move(name_handle)});
+			gMetadata->reservedHandlesIndex.insert(
+			    {HandleIndexKey(handleData, handleName), file_node->id});
 
 			return 0;
 		} else {
+			gMetadata->trashHandlesIndex.erase(
+			    HandleIndexKey(gMetadata->trash.at(TrashPathKey(p)).data(),
+			                   gMetadata->trash.at(TrashPathKey(p)).get()));
 			gMetadata->trash.erase(TrashPathKey(p));
 
 			p->ctime = ts;
@@ -1409,6 +1446,9 @@ int fsnodes_purge(uint32_t ts, FSNode *p) {
 		gMetadata->reservedSpace -= file_node->length;
 		gMetadata->reservedNodes--;
 
+		gMetadata->reservedHandlesIndex.erase(
+		    HandleIndexKey(gMetadata->reserved.at(file_node->id).data(),
+		                   gMetadata->reserved.at(file_node->id).get()));
 		gMetadata->reserved.erase(file_node->id);
 
 		file_node->ctime = ts;
@@ -1491,8 +1531,12 @@ uint8_t fsnodes_undel(uint32_t ts, FSNodeFile *node) {
 			}
 			// remove from trash and link to new parent
 			if (node->type == FSNodeType::kTrash) {
+				gMetadata->trashHandlesIndex.erase(
+				    HandleIndexKey(gMetadata->trash.at(TrashPathKey(node)).data(), gMetadata->trash.at(TrashPathKey(node)).get()));
 				gMetadata->trash.erase(TrashPathKey(node));
 			} else {
+				gMetadata->reservedHandlesIndex.erase(
+				    HandleIndexKey(gMetadata->reserved.at(node->id).data(), path));
 				gMetadata->reserved.erase(node->id);
 			}
 

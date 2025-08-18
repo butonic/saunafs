@@ -537,6 +537,8 @@ static void fs_do_emptytrash(uint32_t ts) {
 		FSNodeFile *node = fsnodes_id_to_node_verify<FSNodeFile>((*it).first.id);
 
 		if (!node) {
+			gMetadata->trashHandlesIndex.erase(
+			    HandleIndexKey((*it).second.data(), (*it).second.get()));
 			gMetadata->trash.erase(it);
 			it = gMetadata->trash.begin();
 			continue;
@@ -572,6 +574,8 @@ static void fs_do_emptyreserved(uint32_t ts) {
 		FSNodeFile *node = fsnodes_id_to_node_verify<FSNodeFile>((*it).first);
 
 		if (!node) {
+			gMetadata->reservedHandlesIndex.erase(
+			    HandleIndexKey((*it).second.data(), (*it).second.get()));
 			gMetadata->reserved.erase(it);
 			it = gMetadata->reserved.begin();
 			continue;

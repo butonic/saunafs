@@ -221,7 +221,12 @@ uint8_t fs_settrashpath(const FsContext &context, inode_t inode, const std::stri
 		}
 	}
 
+	gMetadata->trashHandlesIndex.erase(HandleIndexKey(gMetadata->trash[TrashPathKey(p)].data(),
+	                                                  gMetadata->trash[TrashPathKey(p)].get()));
 	gMetadata->trash[TrashPathKey(p)] = HString(path);
+	gMetadata->trashHandlesIndex.insert({HandleIndexKey(gMetadata->trash[TrashPathKey(p)].data(),
+	                                                    gMetadata->trash[TrashPathKey(p)].get()),
+	                                     p->id});
 
 	if (context.isPersonalityMaster()) {
 		fs_changelog(context.ts(), "SETPATH(%" PRIiNode ",%s)", p->id,
