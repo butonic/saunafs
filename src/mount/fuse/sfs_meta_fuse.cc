@@ -44,6 +44,7 @@
 #include "mount/mastercomm.h"
 #include "mount/masterproxy.h"
 #include "protocol/SFSCommunication.h"
+#include "protocol/handle_inode_entry.h"
 #include "slogger/slogger.h"
 
 static_assert(FUSE_ROOT_ID == SPECIAL_INODE_ROOT, "invalid value of FUSE_ROOT_ID");
@@ -75,6 +76,9 @@ constexpr uint64_t kStatfsFilesBase = 1'000'000'000 + PKGVERSION;
 
 struct DirectoryBuffer {
 	bool wasRead = false;
+	off_t currentOffsetFromCachedEntries;
+	uint64_t currentReadIndexFromCachedEntries;
+	std::vector<HandleInodeEntry> entries;
 	std::vector<uint8_t> buffer;
 	std::mutex lock;
 };
@@ -330,6 +334,16 @@ static uint32_t getDirMetaEntriesSize(inode_t ino) {
 	return 0;
 }
 
+bool isMetaEntryName(const char *name, size_t len) {
+	static const char *meta_names[] = {".", "..", SPECIAL_FILE_NAME_META_TRASH,
+	                                   SPECIAL_FILE_NAME_META_UNDEL,
+	                                   SPECIAL_FILE_NAME_META_RESERVED};
+	for (const char *meta : meta_names) {
+		if (strlen(meta) == len && std::memcmp(name, meta, len) == 0) { return true; }
+	}
+	return false;
+}
+
 static void fillDirMetaEntries(uint8_t *buff, inode_t ino) {
 	uint8_t nameLength;
 	switch (ino) {
@@ -427,6 +441,24 @@ static uint32_t getDirDataEntriesSize(const std::vector<NamedInodeEntry> &entrie
 	return totalSize;
 }
 
+static uint32_t getDirDataEntriesSize(const std::vector<HandleInodeEntry> &entries) {
+	uint8_t nameLength;
+	uint32_t totalSize = 0;
+
+	if (entries.empty()) { return 0; }
+
+	for (const auto &entry : entries) {
+		nameLength = entry.name.size();
+		if (nameLength > NAME_MAX - kDirEntryHexPreffixSize) {
+			totalSize += kDirEntryStride + NAME_MAX;
+		} else {
+			totalSize += kDirEntryStride + nameLength + kDirEntryHexPreffixSize;
+		}
+	}
+
+	return totalSize;
+}
+
 static void convertDirDataEntries(uint8_t *buff, const std::vector<NamedInodeEntry> &entries) {
 	const uint8_t *name{};
 	uint8_t nameLength{};
@@ -462,6 +494,41 @@ static void convertDirDataEntries(uint8_t *buff, const std::vector<NamedInodeEnt
 	}
 }
 
+static void convertDirDataEntries(uint8_t *buff, const std::vector<HandleInodeEntry> &entries) {
+	const uint8_t *name{};
+	uint8_t nameLength{};
+	uint8_t inodeLength{};
+
+	for (const auto &entry : entries) {
+		nameLength = entry.name.size();
+
+		if (nameLength > NAME_MAX - kDirEntryHexPreffixSize) {
+			inodeLength = NAME_MAX;
+		} else {
+			inodeLength = nameLength + kDirEntryHexPreffixSize;
+		}
+
+		put8bit(&buff, inodeLength);
+		name = reinterpret_cast<const uint8_t *>(entry.name.c_str());
+		sprintf((char *)buff, "%0*" PRIXiNode "|", 2 * (int)sizeof(inode_t), entry.inode);
+
+		uint8_t sizeOfTrailingNamePiece =
+		    std::min(nameLength, static_cast<uint8_t>(NAME_MAX - kDirEntryHexPreffixSize));
+		memcpy(buff + kDirEntryHexPreffixSize, name, sizeOfTrailingNamePiece);
+
+		// Replace '/' with '|' in the name part of the entry
+		for (size_t i = 0; i < sizeOfTrailingNamePiece; i++) {
+			if (buff[kDirEntryHexPreffixSize + i] == '/') {
+				buff[kDirEntryHexPreffixSize + i] = '|';
+			}
+		}
+
+		buff += sizeOfTrailingNamePiece + kDirEntryHexPreffixSize;
+		putINode(&buff, entry.inode);
+		put8bit(&buff, TYPE_FILE);
+	}
+}
+
 void sfs_meta_opendir(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi) {
 	constexpr auto isValidMetaMountInode = [](inode_t inode) {
 		return inode == SPECIAL_INODE_ROOT || inode == SPECIAL_INODE_META_TRASH ||
@@ -470,7 +537,10 @@ void sfs_meta_opendir(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi)
 
 	if (isValidMetaMountInode(ino)) {
 		auto *dirinfo = new DirectoryBuffer();
+		dirinfo->currentOffsetFromCachedEntries = 0;
+		dirinfo->currentReadIndexFromCachedEntries = 0;
 		dirinfo->buffer.clear();
+		dirinfo->entries.clear();
 		dirinfo->wasRead = false;
 		fi->fh = reinterpret_cast<uintptr_t>(dirinfo);
 
@@ -525,7 +595,12 @@ void fillDirEntryBuffer(fuse_req_t req, DirectoryBuffer *dirinfo, off_t &off, ch
 	uint8_t done = 0;
 
 	size = std::min<size_t>(size, READDIR_BUFFSIZE);
-	const uint8_t *entryPtr = reinterpret_cast<const uint8_t *>(dirinfo->buffer.data()) + off;
+
+	off_t startOffset = masterVersion < kFirstVersionWithReadTrashReservedByHandleOffset
+	                        ? off
+	                        : dirinfo->currentOffsetFromCachedEntries;
+
+	const uint8_t *entryPtr = reinterpret_cast<const uint8_t *>(dirinfo->buffer.data()) + startOffset;
 	const uint8_t *endPtr =
 	    reinterpret_cast<const uint8_t *>(dirinfo->buffer.data()) + dirinfo->buffer.size();
 
@@ -534,7 +609,18 @@ void fillDirEntryBuffer(fuse_req_t req, DirectoryBuffer *dirinfo, off_t &off, ch
 		entryPtr++;
 		entryName = (char *)entryPtr;
 		entryPtr += nameLength;
-		off += nameLength + kDirEntryStride;
+
+		if (masterVersion < kFirstVersionWithReadTrashReservedByHandleOffset) {
+			off += nameLength + kDirEntryStride;
+		} else {
+			if (!isMetaEntryName(entryName, nameLength)) {
+				off = dirinfo->entries[dirinfo->currentReadIndexFromCachedEntries].data;
+			} else {
+				off = dirinfo->entries.empty() ? off + nameLength + kDirEntryStride
+				                               : dirinfo->entries[0].data;
+			}
+		}
+
 		if (entryPtr + kDirEntryMetaSize <= endPtr) {
 			getINode(&entryPtr, inode);
 			type = get8bit(&entryPtr);
@@ -547,13 +633,17 @@ void fillDirEntryBuffer(fuse_req_t req, DirectoryBuffer *dirinfo, off_t &off, ch
 			if (writePos + entryLength > size) {
 				done = 1;
 			} else {
+				if (!isMetaEntryName(entryName, nameLength)) {
+					dirinfo->currentReadIndexFromCachedEntries++;
+				}
+				dirinfo->currentOffsetFromCachedEntries += nameLength + kDirEntryStride;
 				writePos += entryLength;
 			}
 		}
 	}
 }
 
-void getDirectoryEntriesLimited(DirectoryBuffer *dirinfo, inode_t ino, off_t byteOffset,
+void getDirectoryEntriesLimited(DirectoryBuffer *dirinfo, inode_t ino, off_t offset,
                                 size_t maxByteSize) {
 	uint8_t status = 0;
 	uint32_t entriesSize = 0;
@@ -561,15 +651,43 @@ void getDirectoryEntriesLimited(DirectoryBuffer *dirinfo, inode_t ino, off_t byt
 	uint32_t dataEntriesSize = 0;
 	std::vector<uint8_t> bufData;
 
-	// Check if the directory has already been read and cached
-	if (dirinfo->wasRead) { return; }
+	// If the directory has already been read and cached, we may be able to skip.
+	// Behavior depends on the master version.
+	if (masterVersion < kFirstVersionWithReadTrashReservedByHandleOffset) {
+		// For older versions, it’s enough to check if the directory was read.
+		if (dirinfo->wasRead) { return; }
+	} else {
+		// For newer versions, we need to check that the cached offset is valid.
+		if (!dirinfo->entries.empty() &&
+		    (static_cast<std::make_unsigned<off_t>::type>(offset) & ~(1ULL << 63ULL)) <=
+		        (dirinfo->entries.back().data & ~(1ULL << 63ULL)) &&
+		    (dirinfo->currentReadIndexFromCachedEntries < dirinfo->entries.size() - 1 ||
+		     !(dirinfo->currentReadIndexFromCachedEntries >= dirinfo->entries.size() &&
+		       (static_cast<std::make_unsigned<off_t>::type>(offset) & ~(1ULL << 63ULL)) ==
+		           (dirinfo->entries.back().data & ~(1ULL << 63ULL))))) {
+			return;
+		}
+		if (!dirinfo->entries.empty() &&
+		    dirinfo->currentReadIndexFromCachedEntries == dirinfo->entries.size() &&
+		    (static_cast<std::make_unsigned<off_t>::type>(offset) & ~(1ULL << 63ULL)) ==
+		        (dirinfo->entries.back().data & ~(1ULL << 63ULL))) {
+			offset = (dirinfo->entries.back().data & ~(1ULL << 63ULL)) + 1ULL;
+		}
+	}
 
-	if (byteOffset == 0) {
+	// Empty dirinfo main fields for new cached batch of entries
+	dirinfo->wasRead = false;
+	dirinfo->currentOffsetFromCachedEntries = 0;
+	dirinfo->currentReadIndexFromCachedEntries = 0;
+	dirinfo->entries.clear();
+	dirinfo->buffer.clear();
+
+	if (offset == 0) {
 		metaEntriesSize = getDirMetaEntriesSize(ino);
-		if (metaEntriesSize > 0 && byteOffset < metaEntriesSize) {
+		if (metaEntriesSize > 0 && offset < metaEntriesSize) {
 			std::vector<uint8_t> metaBuf(metaEntriesSize);
 			fillDirMetaEntries(metaBuf.data(), ino);
-			size_t start = byteOffset;
+			size_t start = offset;
 			size_t toCopy = std::min(maxByteSize, metaEntriesSize - start);
 			bufData.insert(bufData.end(), metaBuf.begin() + start,
 			               metaBuf.begin() + start + toCopy);
@@ -579,25 +697,52 @@ void getDirectoryEntriesLimited(DirectoryBuffer *dirinfo, inode_t ino, off_t byt
 	// Offset is in data entries
 	entriesSize = kMaxEntriesToCache;
 
-	std::vector<NamedInodeEntry> entries;
-	if (ino == SPECIAL_INODE_META_TRASH) {
-		status = fs_gettrash(0, entriesSize, entries);
-	} else if (ino == SPECIAL_INODE_META_RESERVED) {
-		status = fs_getreserved(0, entriesSize, entries);
-	}
+	if (masterVersion < kFirstVersionWithReadTrashReservedByHandleOffset) {
+		std::vector<NamedInodeEntry> entries;
+		if (ino == SPECIAL_INODE_META_TRASH) {
+			status = fs_gettrash(0, entriesSize, entries);
+		} else if (ino == SPECIAL_INODE_META_RESERVED) {
+			status = fs_getreserved(0, entriesSize, entries);
+		}
 
-	dataEntriesSize = getDirDataEntriesSize(entries);
+		dataEntriesSize = getDirDataEntriesSize(entries);
 
-	if (status != SAUNAFS_STATUS_OK || dataEntriesSize == 0) {
+		if (status != SAUNAFS_STATUS_OK || dataEntriesSize == 0) {
+			dirinfo->buffer = bufData;
+			return;
+		}
+
+		bufData.resize(dataEntriesSize + (offset == 0 ? metaEntriesSize : 0));
+		convertDirDataEntries(bufData.data() + (offset == 0 ? metaEntriesSize : 0), entries);
+
 		dirinfo->buffer = bufData;
-		return;
+		dirinfo->wasRead = true;
+	} else {
+		// For newer versions, we read entries starting from the given offset.
+		uint64_t startOff = static_cast<std::make_unsigned<off_t>::type>(offset);
+		// type to cast to should be the same size to avoid potential sign-extension
+		// (SaunaFS's offset can be interpreted as negative on signed integer types (e.g. off_t used
+		// by libfuse), as it is 64bit unsigned int on master)
+		std::vector<HandleInodeEntry> entries;
+		if (ino == SPECIAL_INODE_META_TRASH) {
+			status = fs_gettrash(startOff, entriesSize, entries);
+		} else if (ino == SPECIAL_INODE_META_RESERVED) {
+			status = fs_getreserved(startOff, entriesSize, entries);
+		}
+
+		dataEntriesSize = getDirDataEntriesSize(entries);
+
+		if (status != SAUNAFS_STATUS_OK || dataEntriesSize == 0) {
+			dirinfo->buffer = bufData;
+			return;
+		}
+
+		bufData.resize(dataEntriesSize + (startOff == 0 ? metaEntriesSize : 0));
+		convertDirDataEntries(bufData.data() + (startOff == 0 ? metaEntriesSize : 0), entries);
+
+		dirinfo->entries = entries;
+		dirinfo->buffer = bufData;
 	}
-
-	bufData.resize(dataEntriesSize + (byteOffset == 0 ? metaEntriesSize : 0));
-	convertDirDataEntries(bufData.data() + (byteOffset == 0 ? metaEntriesSize : 0), entries);
-
-	dirinfo->buffer = bufData;
-	dirinfo->wasRead = true;
 }
 
 void sfs_meta_readdir(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off,
@@ -621,7 +766,9 @@ void sfs_meta_readdir(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off,
 
 	getDirectoryEntriesLimited(dirinfo, ino, off, size);
 
-	if (dirinfo->buffer.empty() || size == 0) {
+	if (dirinfo->buffer.empty() || size == 0 ||
+	    (masterVersion >= kFirstVersionWithReadTrashReservedByHandleOffset &&
+	     dirinfo->entries.empty() && dirinfo->currentOffsetFromCachedEntries > 0)) {
 		fuse_reply_buf(req, nullptr, 0);
 		return;
 	}
