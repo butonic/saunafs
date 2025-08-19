@@ -34,9 +34,10 @@
 #ifdef _WIN32
 #include "mount/acquired_files_last_time_used.h"
 #endif
-#include "protocol/packet.h"
-#include "protocol/lock_info.h"
 #include "protocol/directory_entry.h"
+#include "protocol/lock_info.h"
+#include "protocol/packet.h"
+#include "protocol/handle_inode_entry.h"
 #include "protocol/named_inode_entry.h"
 
 #ifdef _WIN32
@@ -114,9 +115,13 @@ uint8_t fs_fullpath(inode_t inode, uint32_t uid, uint32_t gid, std::string &full
 uint8_t fs_getreserved(const uint8_t **dbuff, uint32_t *dbuffsize);
 uint8_t fs_getreserved(SaunaClient::NamedInodeOffset off, SaunaClient::NamedInodeOffset max_entries,
                        std::vector<NamedInodeEntry> &entries);
+uint8_t fs_getreserved(uint64_t off, SaunaClient::NamedInodeOffset max_entries,
+                       std::vector<HandleInodeEntry> &entries);
 uint8_t fs_gettrash(const uint8_t **dbuff, uint32_t *dbuffsize);
 uint8_t fs_gettrash(SaunaClient::NamedInodeOffset off, SaunaClient::NamedInodeOffset max_entries,
                     std::vector<NamedInodeEntry> &entries);
+uint8_t fs_gettrash(uint64_t off, SaunaClient::NamedInodeOffset max_entries,
+                    std::vector<HandleInodeEntry> &entries);
 uint8_t fs_getdetachedattr(inode_t inode, Attributes &attr);
 uint8_t fs_gettrashpath(inode_t inode, const uint8_t **path);
 uint8_t fs_settrashpath(inode_t inode, const uint8_t *path);

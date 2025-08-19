@@ -2589,6 +2589,31 @@ uint8_t fs_getreserved(SaunaClient::NamedInodeOffset off, SaunaClient::NamedInod
 	}
 }
 
+uint8_t fs_getreserved(uint64_t off, SaunaClient::NamedInodeOffset max_entries,
+	               std::vector<HandleInodeEntry> &entries) {
+	threc *rec = fs_get_my_threc();
+	auto message = cltoma::fuseGetReserved::build(rec->packetId, off, max_entries);
+
+	if (!fs_saucreatepacket(rec, message)) {
+		return SAUNAFS_ERROR_IO;
+	}
+
+	if (!fs_sausendandreceive(rec, SAU_MATOCL_FUSE_GETRESERVED, message)) {
+		return SAUNAFS_ERROR_IO;
+	}
+
+	try {
+		PacketVersion dummy_packet_version;
+		uint32_t dummy_message_id;
+		deserializePacketVersionNoHeader(message, dummy_packet_version);
+		matocl::fuseGetReserved::deserialize(message, dummy_message_id, entries);
+		return SAUNAFS_STATUS_OK;
+	} catch (Exception &ex) {
+		fs_got_inconsistent("SAU_MATOCL_FUSE_GETRESERVED", message.size(), ex.what());
+		return SAUNAFS_ERROR_IO;
+	}
+}
+
 uint8_t fs_gettrash(SaunaClient::NamedInodeOffset off, SaunaClient::NamedInodeOffset max_entries,
 	            std::vector<NamedInodeEntry> &entries) {
 	threc *rec = fs_get_my_threc();
@@ -2599,6 +2624,31 @@ uint8_t fs_gettrash(SaunaClient::NamedInodeOffset off, SaunaClient::NamedInodeOf
 	if (!fs_sausendandreceive(rec, SAU_MATOCL_FUSE_GETTRASH, message)) {
 		return SAUNAFS_ERROR_IO;
 	}
+	try {
+		PacketVersion dummy_packet_version;
+		uint32_t dummy_message_id;
+		deserializePacketVersionNoHeader(message, dummy_packet_version);
+		matocl::fuseGetTrash::deserialize(message, dummy_message_id, entries);
+		return SAUNAFS_STATUS_OK;
+	} catch (Exception &ex) {
+		fs_got_inconsistent("SAU_MATOCL_FUSE_GETTRASH", message.size(), ex.what());
+		return SAUNAFS_ERROR_IO;
+	}
+}
+
+uint8_t fs_gettrash(uint64_t off, SaunaClient::NamedInodeOffset max_entries,
+	            std::vector<HandleInodeEntry> &entries) {
+	threc *rec = fs_get_my_threc();
+	auto message = cltoma::fuseGetTrash::build(rec->packetId, off, max_entries);
+
+	if (!fs_saucreatepacket(rec, message)) {
+		return SAUNAFS_ERROR_IO;
+	}
+
+	if (!fs_sausendandreceive(rec, SAU_MATOCL_FUSE_GETTRASH, message)) {
+		return SAUNAFS_ERROR_IO;
+	}
+
 	try {
 		PacketVersion dummy_packet_version;
 		uint32_t dummy_message_id;
