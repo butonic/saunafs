@@ -20,9 +20,19 @@
 
 #include "common/platform.h"
 
+#include <cstdint>
+
 #include "fdb/fdb_context.h"
 #include "kv/ikv_engine.h"
 #include "master/metadata_backend_interface.h"
+
+/// Simplified Metadata Section structure for FoundationDB
+struct MetadataSectionFDB {
+	std::string name;    ///< Name of the section
+	std::string prefix;  ///< Prefix for the section keys
+
+	std::function<int8_t(bool)> loadFunction;  ///< Function to load the section
+};
 
 class MetadataBackendFDB : public IMetadataBackend {
 public:
@@ -73,16 +83,37 @@ public:
 	IMetadataDumper *dumper() override { return dumper_.get(); }
 #endif  // #if !defined(METARESTORE) && !defined(METALOGGER)
 
+	/// Fetches the root directory from the database if it exists.
+	FSNode *getRootDirFromDB();
+
 private:
-#if !defined(METARESTORE) && !defined(METALOGGER)
-	std::unique_ptr<IMetadataDumper> dumper_;
-#endif  // #ifndef METARESTORE
+	/// Initializes the vector of metadata sections for later loading
+	void initSections();
 
 	bool initFoundationDB(const std::string &clusterFile);
+
+	/// The root key does not change (we can cache it)
+	void initRootKey();
 
 	///  Registers observers/watchers on selected metadata properties
 	void createConnections();
 
+	// FS Load from FDB
+
+	/// Loads all sections
+	int fsLoad(bool ignoreFlag);
+
+	/// Loads NODE_ metadata
+	int8_t loadNodes(bool ignoreFlag);
+
+#if !defined(METARESTORE) && !defined(METALOGGER)
+	std::unique_ptr<IMetadataDumper> dumper_;
+#endif  // #ifndef METARESTORE
+
 	std::shared_ptr<fdb::FDBContext> fdbContext_;
 	std::shared_ptr<kv::IKVEngine> kvEngine_;
+
+	kv::Key rootKey_;  ///< Cached root directory key
+
+	std::vector<MetadataSectionFDB> metadataSections_;
 };

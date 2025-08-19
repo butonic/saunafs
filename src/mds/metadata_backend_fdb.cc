@@ -25,10 +25,12 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <vector>
 
 #include "common/datapack.h"
 #include "common/event_loop.h"
 #include "common/serialization.h"
+#include "common/special_inode_defs.h"
 #include "common/type_defs.h"
 #include "config/cfg.h"
 #include "fdb/fdb_context.h"
@@ -38,11 +40,13 @@
 #include "master/chunks.h"
 #include "master/filesystem.h"
 #include "master/filesystem_metadata.h"
+#include "master/filesystem_node.h"
 #include "master/filesystem_node_types.h"
 #include "master/filesystem_operations.h"
 #include "master/filesystem_quota.h"
 #include "master/matoclserv.h"
 #include "master/matomlserv.h"
+#include "master/metadata_backend_interface.h"
 #include "mds/metadata_dumper_fdb.h"
 #include "slogger/slogger.h"
 
@@ -51,6 +55,9 @@ MetadataBackendFDB::MetadataBackendFDB()
     : dumper_(std::make_unique<MetadataDumperFDB>())
 #endif  // #if !defined(METARESTORE) && !defined(METALOGGER)
 {
+	initSections();
+	initRootKey();
+
 	std::string clusterFile = cfg_getstring("FDB_CLUSTER_FILE", "");
 
 	if (clusterFile.empty()) {
@@ -117,22 +124,100 @@ uint8_t MetadataBackendFDB::fs_storeall(DumpType dumpType) {
 
 #ifndef METALOGGER
 
-void MetadataBackendFDB::loadall(int ignoreflag) {
-	safs::log_err("MetadataBackendFDB::loadall: ignoreflag: {}", ignoreflag);
+int8_t MetadataBackendFDB::loadNodes(bool ignoreFlag) {
+	(void)ignoreFlag;  // Unused parameter
 
-	std::string metadataFile_ = "NOT_NEEDED";
+	auto transaction = kvEngine_->createReadWriteTransaction();
+	std::string endKey = "NODE_\\xff";
+	kv::KeySelector startSelector(rootKey_, false, 0);
+	kv::KeySelector endSelector(kv::Key(endKey.begin(), endKey.end()), true, 0);
+
+	// TODO(Guillex): use the pagination
+	auto rangeResult = transaction->getRange(startSelector, endSelector, 1000);
+
+	for (const auto &pair : rangeResult.getPairs()) {
+		const uint8_t *source = pair.value.data();
+		auto type = static_cast<FSNodeType>(source[0]);
+		FSNode *node = FSNode::create(type);
+		node->deserialize(&source);
 
 #ifndef METARESTORE
-	safs_pretty_syslog(
-	    LOG_INFO,
-	    "metadata file %s read (%" PRIiNode " inodes including %" PRIiNode
-	    " directory inodes, %" PRIiNode " file inodes, %" PRIiNode
-	    " symlink inodes and %" PRIu32 " chunks)",
-	    metadataFile_.c_str(), gMetadata->nodes, gMetadata->dirNodes,
-	    gMetadata->fileNodes, gMetadata->linkNodes, chunk_count());
-#else
-	safs_pretty_syslog(LOG_INFO, "metadata file %s read", metadataFile_.c_str());
+		auto *nodeFile = static_cast<FSNodeFile *>(node);
 #endif
+
+		switch (type) {
+		case FSNodeType::kDirectory:
+			gMetadata->dirNodes++;
+			break;
+		case FSNodeType::kSocket:
+		case FSNodeType::kFifo:
+		case FSNodeType::kBlockDev:
+		case FSNodeType::kCharDev:
+			// Nothing extra to do
+			break;
+		case FSNodeType::kSymlink:
+			gMetadata->linkNodes++;
+			break;
+		case FSNodeType::kFile:
+		case FSNodeType::kTrash:
+		case FSNodeType::kReserved:
+#ifndef METARESTORE
+			for (const auto &sessionId : nodeFile->sessionIds) {
+				matoclserv_add_open_file(sessionId, node->id);
+			}
+#endif
+			fsnodes_quota_update(node, {{QuotaResource::kSize, +fsnodes_get_size(node)}});
+			gMetadata->fileNodes++;
+			break;
+		default:
+			safs::log_err("loading node: unrecognized node type: {}", static_cast<char>(type));
+			fsnodes_quota_update(node, {{QuotaResource::kInodes, +1}});
+			return kOpFailure;
+		}
+
+		safs::log_info("Add node: {}", node->id);
+
+		gMetadata->addNode(node, true);
+		gMetadata->inodePool.markAsAcquired(node->id);
+		gMetadata->nodes++;
+		fsnodes_quota_update(node, {{QuotaResource::kInodes, +1}});
+	}
+
+	return kOpSuccess;
+}
+
+int MetadataBackendFDB::fsLoad(bool ignoreFlag) {
+	for (const auto &section : metadataSections_) {
+		auto result = section.loadFunction(ignoreFlag);
+
+		if (result != kOpSuccess) {
+			safs::log_err("Failed to load section: {}", section.name);
+			return result;
+		}
+	}
+
+	return kOpSuccess;
+}
+
+void MetadataBackendFDB::loadall(int ignoreflag) {
+	safs::log_info("MetadataBackendFDB::loadall: ignoreflag: {}", ignoreflag);
+
+	// Load metadata global properties and check signature
+
+	// TODO(Guillex): implement signature check
+
+	// Load the metadata sections
+
+	if (fsLoad(ignoreflag) != kOpSuccess) {
+		throw MetadataConsistencyException(MetadataStructureReadErrorMsg);
+	}
+
+	safs_pretty_syslog(LOG_INFO,
+	                   "metadata read (%" PRIiNode " inodes including %" PRIiNode
+	                   " directory inodes, %" PRIiNode " file inodes, %" PRIiNode
+	                   " symlink inodes and %" PRIu32 " chunks)",
+	                   gMetadata->nodes, gMetadata->dirNodes, gMetadata->fileNodes,
+	                   gMetadata->linkNodes, chunk_count());
 }
 
 void MetadataBackendFDB::store_fd(FILE *fd) {
@@ -141,26 +226,48 @@ void MetadataBackendFDB::store_fd(FILE *fd) {
 
 #endif  // #ifndef METALOGGER
 
-// TODO(guillex): de-duplicate this function implementation (it is in MetadataBackendFile as well)
+FSNode *MetadataBackendFDB::getRootDirFromDB() {
+	auto transaction = kvEngine_->createReadWriteTransaction();
+	auto result = transaction->get(rootKey_);
+
+	if (result != std::nullopt) {
+		FSNode *node = FSNode::create(FSNodeType::kDirectory);
+		const uint8_t *source = result.value().data();
+		node->deserialize(&source);
+		return node;
+	}
+
+	return nullptr;
+}
+
 void fs_new(void) {
 	gMetadata->maxInodeId().setValue(SPECIAL_INODE_ROOT);
 	gMetadata->metadataVersion = 1;
 	gMetadata->nextSessionId().setValue(1);
 
-	auto *rootDirectory = FSNode::create(FSNodeType::kDirectory);
-	gMetadata->root = static_cast<FSNodeDirectory *>(rootDirectory);
-	gMetadata->root->id = SPECIAL_INODE_ROOT;
-	gMetadata->root->atime = eventloop_time();
-	gMetadata->root->mtime = gMetadata->root->atime;
-	gMetadata->root->ctime = gMetadata->root->mtime;
-	gMetadata->root->goal = DEFAULT_GOAL;
-	gMetadata->root->trashtime = kDefaultTrashTime;
-	gMetadata->root->mode = 0777;
-	gMetadata->root->uid = 0;
-	gMetadata->root->gid = 0;
+	// Check if the root directory is already in the database
 
-	uint32_t hashRootIndex = NODEHASHPOS(gMetadata->root->id);
-	gMetadata->nodeHash[hashRootIndex].push_back(gMetadata->root);
+	// TODO(Guillex): make it part of the interface
+	FSNode *rootDir = static_cast<MetadataBackendFDB *>(gMetadataBackend.get())->getRootDirFromDB();
+
+	if (rootDir == nullptr) {  // Root dir not found in the database, assuming new filesystem
+		auto *rootDirectory = FSNode::create(FSNodeType::kDirectory);
+		gMetadata->root = static_cast<FSNodeDirectory *>(rootDirectory);
+		gMetadata->root->id = SPECIAL_INODE_ROOT;
+		gMetadata->root->atime = eventloop_time();
+		gMetadata->root->mtime = gMetadata->root->atime;
+		gMetadata->root->ctime = gMetadata->root->mtime;
+		gMetadata->root->goal = DEFAULT_GOAL;
+		gMetadata->root->trashtime = kDefaultTrashTime;
+		gMetadata->root->mode = 0777;
+		gMetadata->root->uid = 0;
+		gMetadata->root->gid = 0;
+		gMetadata->addNode(gMetadata->root);  // Add the root dir and save it to database
+	} else {
+		gMetadata->root = static_cast<FSNodeDirectory *>(rootDir);
+		gMetadata->addNode(gMetadata->root, true);  // Don't save it to database, already there
+	}
+
 	gMetadata->inodePool.markAsAcquired(gMetadata->root->id);
 
 	chunk_newfs();
@@ -171,6 +278,18 @@ void fs_new(void) {
 
 	fs_checksum(ChecksumMode::kForceRecalculate);
 	fsnodes_quota_update(gMetadata->root, {{QuotaResource::kInodes, +1}});
+}
+
+void MetadataBackendFDB::initSections() {
+	metadataSections_.emplace_back("NODE 1.0", "NODE_",
+	                               [this](bool flag) { return loadNodes(flag); });
+	// 	sections_.emplace_back("EDGE 1.0", "EDGE_", loadEdges);
+	// 	sections_.emplace_back("FREE 1.0", "FREE_", loadFree);
+	// 	sections_.emplace_back("XATR 1.0", "XATR_", loadXAttr);
+	// 	sections_.emplace_back("ACLS 1.2", "ACLS_", loadACLs);
+	// 	sections_.emplace_back("QUOT 1.1", "QUOT_", loadQuotas);
+	// 	sections_.emplace_back("FLCK 1.0", "FLCK_", loadLocks);
+	// 	sections_.emplace_back("CHNK 1.0", "CHNK_", loadChunks);
 }
 
 void MetadataBackendFDB::init() {
@@ -198,12 +317,11 @@ void MetadataBackendFDB::init() {
 	}
 
 	gMetadata = new FilesystemMetadata;
+	createConnections();
 	chunk_strinit();
 	fs_new();  // Initialize the metadata structure
 
 	safs::log_info("Metadata version: {}", version);
-
-	createConnections();
 }
 
 uint64_t MetadataBackendFDB::getVersion(const std::string & /*file*/) {
@@ -304,4 +422,34 @@ void MetadataBackendFDB::createConnections() {
 			safs::log_err("Changelog entry committed but version is not available");
 		}
 	});
+
+	gMetadata->nodeChangedSignal.connect([this](FSNode *node) {
+		auto transaction = kvEngine_->createReadWriteTransaction();
+
+		// Key
+		static std::string nodePrefix = "NODE_";
+		kv::Key key(nodePrefix.length() + sizeof(node->id));
+		std::memcpy(key.data(), nodePrefix.data(), nodePrefix.length());
+		uint8_t *idPtr = key.data() + nodePrefix.length();
+		putINode(&idPtr, node->id);
+
+		// Value
+		kv::Value value;
+		value.resize(node->serializedSize());
+		uint8_t *ptr = value.data();
+		node->serialize(&ptr);
+		transaction->set(key, value);
+
+		if (!transaction->commit()) {
+			safs::log_err("Failed to store node: {}", node->id);
+		}
+	});
+}
+
+void MetadataBackendFDB::initRootKey() {
+	std::string nodePrefix = "NODE_";
+	rootKey_ = kv::Key(nodePrefix.length() + sizeof(inode_t));
+	std::memcpy(rootKey_.data(), nodePrefix.data(), nodePrefix.length());
+	uint8_t *idPtr = rootKey_.data() + nodePrefix.length();
+	putINode(&idPtr, static_cast<inode_t>(SPECIAL_INODE_ROOT));
 }
