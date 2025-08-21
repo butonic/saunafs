@@ -186,6 +186,167 @@ int8_t MetadataBackendFDB::loadNodes(bool ignoreFlag) {
 	return kOpSuccess;
 }
 
+int8_t MetadataBackendFDB::loadEdges(bool ignoreFlag) {
+	auto transaction = kvEngine_->createReadWriteTransaction();
+	std::string iniKey = "EDGE_";
+	std::string endKey = "EDGE_\\xff";
+	kv::KeySelector startSelector(kv::Key(iniKey.begin(), iniKey.end()), true, 0);
+	kv::KeySelector endSelector(kv::Key(endKey.begin(), endKey.end()), true, 0);
+
+	// TODO(Guillex): use the pagination
+	auto rangeResult = transaction->getRange(startSelector, endSelector, 1000);
+
+	inode_t parentId{};
+	inode_t childId{};
+	std::string edgeName{};
+
+	loadEdge(0, 0, "init", true, true);
+
+	int8_t status = kOpSuccess;
+
+	for (const auto &pair : rangeResult.getPairs()) {
+		const uint8_t *source = pair.key.data();
+		source += 5;  // Skip "EDGE_"
+		getINode(&source, parentId);
+		getINode(&source, childId);
+
+		source = pair.value.data();
+		edgeName = std::string(reinterpret_cast<const char *>(source), pair.value.size());
+
+		// Process the edge
+		safs::log_info("Inserting edge: {} -> {} : {}", parentId, childId, edgeName);
+		status = loadEdge(parentId, childId, edgeName, ignoreFlag, false);
+
+		if (status < 0) {
+			safs::log_err("Error loading edge: {} -> {} : {}", parentId, childId, edgeName);
+			return kOpFailure;
+		}
+
+		safs::log_info("Edge parsed {} -> {} : {}", parentId, childId, edgeName);
+	}
+
+	return kOpSuccess;
+}
+
+int8_t MetadataBackendFDB::loadEdge(inode_t parentId, inode_t childId, const std::string &name,
+                                    bool ignoreFlag, bool init) {
+
+	static inode_t currentParentId;
+
+	if (init) {
+		currentParentId = 0;
+		return kOpSuccess;
+	}
+
+	FSNode *child = fsnodes_id_to_node(childId);
+
+	if (!child) {
+		safs::log_err("loading edge: {}, {}->{} error: child not found", parentId,
+		              fsnodes_escape_name(name), childId);
+
+		if (ignoreFlag) { return kOpSuccess; }
+
+		return kOpFailure;
+	}
+
+	if (!parentId) {
+		if (child->type == FSNodeType::kTrash) {
+			gMetadata->trash.insert(
+			    {TrashPathKey(child), hstorage::Handle(name)});
+			gMetadata->trashSpace += static_cast<FSNodeFile *>(child)->length;
+			gMetadata->trashNodes++;
+		} else if (child->type == FSNodeType::kReserved) {
+			gMetadata->reserved.insert({child->id, hstorage::Handle(name)});
+			gMetadata->reservedSpace += static_cast<FSNodeFile *>(child)->length;
+			gMetadata->reservedNodes++;
+		} else {
+			safs::log_err("loading edge: {}, {}->{} error: bad child type ({})", parentId,
+			              fsnodes_escape_name(name), childId, static_cast<char>(child->type));
+			return kOpFailure;
+		}
+	} else {
+		auto *parent = fsnodes_id_to_node<FSNodeDirectory>(parentId);
+
+		if (!parent) {
+			safs::log_err("loading edge: {}, {}->{} error: parent not found", parentId,
+			              fsnodes_escape_name(name), childId);
+
+			if (ignoreFlag) {
+				parent = fsnodes_id_to_node<FSNodeDirectory>(SPECIAL_INODE_ROOT);
+
+				if (!parent || parent->type != FSNodeType::kDirectory) {
+					safs::log_err(
+					    "loading edge: {}, {}->{} root dir not found !!!",
+					    parentId, fsnodes_escape_name(name), childId);
+					return kOpFailure;
+				}
+
+				safs::log_err("loading edge: {}, {}->{} attaching node to root dir",
+				               parentId, fsnodes_escape_name(name), childId);
+				parentId = SPECIAL_INODE_ROOT;
+			} else {
+				safs::log_err("use sfsmetarestore (option -i) to attach this node to root dir");
+				return kOpFailure;
+			}
+		}
+
+		if (parent->type != FSNodeType::kDirectory) {
+			safs::log_err("loading edge: {}, {}->{} error: bad parent type ({})", parentId,
+			              fsnodes_escape_name(name), childId, static_cast<char>(parent->type));
+
+			if (ignoreFlag) {
+				parent = fsnodes_id_to_node<FSNodeDirectory>(SPECIAL_INODE_ROOT);
+
+				if (!parent || parent->type != FSNodeType::kDirectory) {
+					safs::log_err("loading edge: {}, {}->{} root dir not found !!!", parentId,
+					              fsnodes_escape_name(name), childId);
+					return kOpFailure;
+				}
+
+				safs::log_err("loading edge: {}, {}->{} attaching node to root dir", parentId,
+				              fsnodes_escape_name(name), childId);
+				parentId = SPECIAL_INODE_ROOT;
+			} else {
+				safs::log_err("use sfsmetarestore (option -i) to attach this node to root dir");
+				return kOpFailure;
+			}
+		}
+
+		if (currentParentId != parentId) {
+			if (parent->entries.size() > 0) {
+				safs::log_err("loading edge: {}, {}->{} error: parent node sequence error",
+				              parentId, fsnodes_escape_name(name).c_str(), childId);
+				return kOpFailure;
+			}
+
+			currentParentId = parentId;
+		}
+
+		auto *handlePtr = new hstorage::Handle(name);
+		auto it = parent->entries.insert({handlePtr, child}).first;
+		parent->entries_hash ^= (*it).first->hash();
+
+		if (parent->case_insensitive) {
+			HString lowerCaseName = HString::hstringToLowerCase(HString(name));
+			auto *lowercaseHandlePtr = new hstorage::Handle(lowerCaseName);
+			auto it = parent->lowerCaseEntries.insert({lowercaseHandlePtr, child}).first;
+			parent->lowerCaseEntriesHash ^= (*it).first->hash();
+		}
+
+		child->parents.push_back({parent->id, handlePtr});
+
+		if (child->type == FSNodeType::kDirectory) {
+			parent->nlink++;
+		}
+
+		StatsRecord statsRecord;
+		fsnodes_get_stats(child, &statsRecord);
+		fsnodes_add_stats(parent, &statsRecord);
+	}
+
+	return kOpSuccess;
+}
+
 int MetadataBackendFDB::fsLoad(bool ignoreFlag) {
 	for (const auto &section : metadataSections_) {
 		auto result = section.loadFunction(ignoreFlag);
@@ -283,7 +444,8 @@ void fs_new(void) {
 void MetadataBackendFDB::initSections() {
 	metadataSections_.emplace_back("NODE 1.0", "NODE_",
 	                               [this](bool flag) { return loadNodes(flag); });
-	// 	sections_.emplace_back("EDGE 1.0", "EDGE_", loadEdges);
+	metadataSections_.emplace_back("EDGE 1.0", "EDGE_",
+	                               [this](bool flag) { return loadEdges(flag); });
 	// 	sections_.emplace_back("FREE 1.0", "FREE_", loadFree);
 	// 	sections_.emplace_back("XATR 1.0", "XATR_", loadXAttr);
 	// 	sections_.emplace_back("ACLS 1.2", "ACLS_", loadACLs);
@@ -442,6 +604,53 @@ void MetadataBackendFDB::createConnections() {
 
 		if (!transaction->commit()) {
 			safs::log_err("Failed to store node: {}", node->id);
+		}
+	});
+
+	gMetadata->edgeChangedSignal.connect(
+	    [this](FSNodeDirectory *parent, FSNode *child, hstorage::Handle *handlePtr) {
+		    safs::log_info("Edge name {}", handlePtr->get());
+		    auto transaction = kvEngine_->createReadWriteTransaction();
+
+		    // Key
+		    static constexpr std::array<uint8_t, 5> edgePrefix = {'E', 'D', 'G', 'E', '_'};
+		    static constexpr size_t kEdgeKeySize =
+		        edgePrefix.size() + sizeof(inode_t) + sizeof(inode_t);
+		    static kv::Key key(kEdgeKeySize);
+		    std::memcpy(key.data(), edgePrefix.data(), edgePrefix.size());
+		    uint8_t *ptr = key.data() + edgePrefix.size();
+		    putINode(&ptr, parent->id);
+		    putINode(&ptr, child->id);
+
+		    auto name = handlePtr->get();
+		    kv::Value value(name.length());
+		    std::memcpy(value.data(), name.data(), name.length());
+
+		    // Value
+		    transaction->set(key, value);
+
+		    if (!transaction->commit()) {
+			    safs::log_err("Failed to store edge: {} -> {} : {}", parent->id, child->id, name);
+		    }
+	    });
+
+	gMetadata->edgeRemovedSignal.connect([this](inode_t parentId, inode_t childId) {
+		auto transaction = kvEngine_->createReadWriteTransaction();
+
+		// Key
+		static constexpr std::array<uint8_t, 5> edgePrefix = {'E', 'D', 'G', 'E', '_'};
+		static constexpr size_t kEdgeKeySize =
+		    edgePrefix.size() + sizeof(inode_t) + sizeof(inode_t);
+		static kv::Key key(kEdgeKeySize);
+		std::memcpy(key.data(), edgePrefix.data(), edgePrefix.size());
+		uint8_t *ptr = key.data() + edgePrefix.size();
+		putINode(&ptr, parentId);
+		putINode(&ptr, childId);
+
+		transaction->remove(key);
+
+		if (!transaction->commit()) {
+			safs::log_err("Failed to remove edge: {} -> {}", parentId, childId);
 		}
 	});
 }
