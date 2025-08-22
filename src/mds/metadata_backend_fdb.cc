@@ -347,6 +347,82 @@ int8_t MetadataBackendFDB::loadEdge(inode_t parentId, inode_t childId, const std
 	return kOpSuccess;
 }
 
+int8_t MetadataBackendFDB::loadFree(bool ignoreFlag) {
+	safs::log_info("Loading free nodes");
+	(void)ignoreFlag;  // Unused parameter
+
+	auto transaction = kvEngine_->createReadWriteTransaction();
+	std::string iniKey = "FREE_";
+	std::string endKey = "FREE_\\xff";
+	kv::KeySelector startSelector(kv::Key(iniKey.begin(), iniKey.end()), true, 0);
+	kv::KeySelector endSelector(kv::Key(endKey.begin(), endKey.end()), true, 0);
+
+	// TODO(Guillex): use the pagination
+	auto rangeResult = transaction->getRange(startSelector, endSelector, 1000);
+
+	inode_t inode{};
+	uint32_t timeStamp{};
+
+	for (const auto &pair : rangeResult.getPairs()) {
+		const uint8_t *source = pair.key.data();
+		source += 5;  // Skip "FREE_"
+		getINode(&source, inode);
+
+		source = pair.value.data();
+		get32bit(&source, timeStamp);
+
+		safs::log_info("Inserting FREE: {} -> {}", inode, timeStamp);
+		gMetadata->inodePool.detain(inode, timeStamp, true);
+	}
+
+	// Connect the signal handlers after initial loading
+
+	gMetadata->inodePool.detainedAddedSignal.connect([this](inode_t id, uint32_t ts) {
+		safs::log_info("Detained added signal: {} -> {}", id, ts);
+		auto transaction = kvEngine_->createReadWriteTransaction();
+
+		// Key
+		static constexpr std::array<uint8_t, 5> freePrefix = {'F', 'R', 'E', 'E', '_'};
+		static constexpr size_t kFreeKeySize = freePrefix.size() + sizeof(inode_t);
+		static kv::Key key(kFreeKeySize);
+		std::memcpy(key.data(), freePrefix.data(), freePrefix.size());
+		uint8_t *ptr = key.data() + freePrefix.size();
+		putINode(&ptr, id);
+
+		kv::Value value(sizeof(ts));
+		ptr = value.data();
+		put32bit(&ptr, ts);
+
+		// Value
+		transaction->set(key, value);
+
+		if (!transaction->commit()) {
+			safs::log_err("Failed to store free node: {} -> {}", id, ts);
+		}
+	});
+
+	gMetadata->inodePool.detainedRemovedSignal.connect([this](inode_t id) {
+		safs::log_info("Detained removed signal: {}", id);
+		auto transaction = kvEngine_->createReadWriteTransaction();
+
+		// Key
+		static constexpr std::array<uint8_t, 5> freePrefix = {'F', 'R', 'E', 'E', '_'};
+		static constexpr size_t kFreeKeySize = freePrefix.size() + sizeof(inode_t);
+		static kv::Key key(kFreeKeySize);
+		std::memcpy(key.data(), freePrefix.data(), freePrefix.size());
+		uint8_t *ptr = key.data() + freePrefix.size();
+		putINode(&ptr, id);
+
+		transaction->remove(key);
+
+		if (!transaction->commit()) {
+			safs::log_err("Failed to remove free node: {}", id);
+		}
+	});
+
+	return kOpSuccess;
+}
+
 int MetadataBackendFDB::fsLoad(bool ignoreFlag) {
 	for (const auto &section : metadataSections_) {
 		auto result = section.loadFunction(ignoreFlag);
@@ -446,7 +522,8 @@ void MetadataBackendFDB::initSections() {
 	                               [this](bool flag) { return loadNodes(flag); });
 	metadataSections_.emplace_back("EDGE 1.0", "EDGE_",
 	                               [this](bool flag) { return loadEdges(flag); });
-	// 	sections_.emplace_back("FREE 1.0", "FREE_", loadFree);
+	metadataSections_.emplace_back("FREE 1.0", "FREE_",
+	                               [this](bool flag) { return loadFree(flag); });
 	// 	sections_.emplace_back("XATR 1.0", "XATR_", loadXAttr);
 	// 	sections_.emplace_back("ACLS 1.2", "ACLS_", loadACLs);
 	// 	sections_.emplace_back("QUOT 1.1", "QUOT_", loadQuotas);
@@ -555,35 +632,35 @@ void MetadataBackendFDB::createConnections() {
 		}
 	});
 
-	getChangelogSignal().connect([this](const ChangelogEvent &event) {
-		static constexpr uint8_t kLogPrefixSize = 4;
-		static kv::Key logKey{'L', 'O', 'G', '_', 'V', 'E', 'R', 'S', 'I', 'O', 'N', '_'};
-		uint8_t *ptr = logKey.data() + kLogPrefixSize;
-		put64bit(&ptr, event.version);
+	// getChangelogSignal().connect([this](const ChangelogEvent &event) {
+	// 	static constexpr uint8_t kLogPrefixSize = 4;
+	// 	static kv::Key logKey{'L', 'O', 'G', '_', 'V', 'E', 'R', 'S', 'I', 'O', 'N', '_'};
+	// 	uint8_t *ptr = logKey.data() + kLogPrefixSize;
+	// 	put64bit(&ptr, event.version);
 
-		// The log itself
-		auto transaction = kvEngine_->createReadWriteTransaction();
-		transaction->set(logKey, kv::toU8Vector(event.entry));
+	// 	// The log itself
+	// 	auto transaction = kvEngine_->createReadWriteTransaction();
+	// 	transaction->set(logKey, kv::toU8Vector(event.entry));
 
-		// Then update the metadata version
-		kv::Value serializedVersion;
-		serialize(serializedVersion, event.version);
-		transaction->set(kv::toU8Vector("META_VERSION"), serializedVersion);
+	// 	// Then update the metadata version
+	// 	kv::Value serializedVersion;
+	// 	serialize(serializedVersion, event.version);
+	// 	transaction->set(kv::toU8Vector("META_VERSION"), serializedVersion);
 
-		if (!transaction->commit()) {
-			safs::log_err("Failed to store changelog entry: {}", event.entry);
-			return;
-		}
+	// 	if (!transaction->commit()) {
+	// 		safs::log_err("Failed to store changelog entry: {}", event.entry);
+	// 		return;
+	// 	}
 
-		auto committedVersion = transaction->getCommittedVersion();
+	// 	auto committedVersion = transaction->getCommittedVersion();
 
-		if (committedVersion.has_value()) {
-			safs::log_info("Commit: {}: {}|{}", committedVersion.value(), event.version,
-			               event.entry);
-		} else {
-			safs::log_err("Changelog entry committed but version is not available");
-		}
-	});
+	// 	if (committedVersion.has_value()) {
+	// 		safs::log_info("Commit: {}: {}|{}", committedVersion.value(), event.version,
+	// 		               event.entry);
+	// 	} else {
+	// 		safs::log_err("Changelog entry committed but version is not available");
+	// 	}
+	// });
 
 	gMetadata->nodeChangedSignal.connect([this](FSNode *node) {
 		auto transaction = kvEngine_->createReadWriteTransaction();
@@ -609,7 +686,6 @@ void MetadataBackendFDB::createConnections() {
 
 	gMetadata->edgeChangedSignal.connect(
 	    [this](FSNodeDirectory *parent, FSNode *child, hstorage::Handle *handlePtr) {
-		    safs::log_info("Edge name {}", handlePtr->get());
 		    auto transaction = kvEngine_->createReadWriteTransaction();
 
 		    // Key
