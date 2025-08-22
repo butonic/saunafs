@@ -112,6 +112,8 @@ private:
 
 	int8_t loadFree(bool ignoreFlag);
 
+	int8_t loadChunks(bool ignoreFlag);
+
 #if !defined(METARESTORE) && !defined(METALOGGER)
 	std::unique_ptr<IMetadataDumper> dumper_;
 #endif  // #ifndef METARESTORE

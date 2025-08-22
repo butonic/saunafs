@@ -423,6 +423,76 @@ int8_t MetadataBackendFDB::loadFree(bool ignoreFlag) {
 	return kOpSuccess;
 }
 
+int8_t MetadataBackendFDB::loadChunks(bool ignoreFlag) {
+	(void)ignoreFlag;  // Unused parameter
+
+	safs::log_info("Loading chunks");
+
+	auto transaction = kvEngine_->createReadWriteTransaction();
+	std::string iniKey = "CHNK_";
+	std::string endKey = "CHNK_\\xff";
+	kv::KeySelector startSelector(kv::Key(iniKey.begin(), iniKey.end()), true, 0);
+	kv::KeySelector endSelector(kv::Key(endKey.begin(), endKey.end()), true, 0);
+
+	// TODO(Guillex): use the pagination
+	auto rangeResult = transaction->getRange(startSelector, endSelector, 1000);
+
+	uint64_t chunkId{};
+	uint32_t chunkVersion{};
+	uint32_t lockedTo{};
+	uint32_t lockId{};
+
+	for (const auto &pair : rangeResult.getPairs()) {
+		const uint8_t *source = pair.key.data();
+		source += 5;  // Skip "CHNK_"
+		chunkId = get64bit(&source);
+		get32bit(&source, chunkVersion);
+
+		source = pair.value.data();
+		get32bit(&source, lockedTo);
+		get32bit(&source, lockId);
+
+		if (chunkId > 0) {
+			chunk_add_from_initial_metadata_load(chunkId, chunkVersion, lockedTo, lockId);
+			safs::log_info("Loaded chunk: {} -> {} (lockedto: {}, lockid: {})",
+			              chunkId, chunkVersion, lockedTo, lockId);
+		}
+	}
+
+	// Connect the signal handlers after initial loading
+
+	gChunkChangedSignal.connect(
+	    [this](uint64_t chunkid, uint32_t version, uint32_t lockedto, uint32_t lockid) {
+			safs::log_info("Chunk changed signal: {} -> {} (lockedto: {}, lockid: {})",
+			              chunkid, version, lockedto, lockid);
+		    auto transaction = kvEngine_->createReadWriteTransaction();
+
+		    // Key
+		    static constexpr std::array<uint8_t, 5> chunkPrefix = {'C', 'H', 'N', 'K', '_'};
+		    static constexpr size_t kChunkKeySize =
+		        chunkPrefix.size() + sizeof(chunkid) + sizeof(version);
+		    static kv::Key key(kChunkKeySize);
+		    std::memcpy(key.data(), chunkPrefix.data(), chunkPrefix.size());
+		    uint8_t *ptr = key.data() + chunkPrefix.size();
+		    put64bit(&ptr, chunkid);
+		    put32bit(&ptr, version);
+
+		    // Value
+		    kv::Value value(sizeof(lockedto) + sizeof(lockid));
+		    ptr = value.data();
+		    put32bit(&ptr, lockedto);
+		    put32bit(&ptr, lockid);
+
+		    transaction->set(key, value);
+
+		    if (!transaction->commit()) {
+			    safs::log_err("Failed to store chunk metadata: {} -> {}", chunkid, version);
+		    }
+	    });
+
+	return kOpSuccess;
+}
+
 int MetadataBackendFDB::fsLoad(bool ignoreFlag) {
 	for (const auto &section : metadataSections_) {
 		auto result = section.loadFunction(ignoreFlag);
@@ -528,7 +598,8 @@ void MetadataBackendFDB::initSections() {
 	// 	sections_.emplace_back("ACLS 1.2", "ACLS_", loadACLs);
 	// 	sections_.emplace_back("QUOT 1.1", "QUOT_", loadQuotas);
 	// 	sections_.emplace_back("FLCK 1.0", "FLCK_", loadLocks);
-	// 	sections_.emplace_back("CHNK 1.0", "CHNK_", loadChunks);
+	metadataSections_.emplace_back("CHNK 1.0", "CHNK_",
+	                               [this](bool flag) { return loadChunks(flag); });
 }
 
 void MetadataBackendFDB::init() {
