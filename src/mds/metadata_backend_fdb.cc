@@ -22,6 +22,7 @@
 
 #include <fcntl.h>  // for open and O_RDONLY
 #include <sys/mman.h>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -132,56 +133,75 @@ int8_t MetadataBackendFDB::loadNodes(bool ignoreFlag) {
 	kv::KeySelector startSelector(rootKey_, false, 0);
 	kv::KeySelector endSelector(kv::Key(endKey.begin(), endKey.end()), true, 0);
 
-	// TODO(Guillex): use the pagination
-	auto rangeResult = transaction->getRange(startSelector, endSelector, 1000);
+	static constexpr size_t kNodePageSize = 1000;  // Number of entries to fetch per page
 
-	for (const auto &pair : rangeResult.getPairs()) {
-		const uint8_t *source = pair.value.data();
-		auto type = static_cast<FSNodeType>(source[0]);
-		FSNode *node = FSNode::create(type);
-		node->deserialize(&source);
+	while (true) {
+		auto pageResult = transaction->getRange(startSelector, endSelector, kNodePageSize);
 
-#ifndef METARESTORE
-		auto *nodeFile = static_cast<FSNodeFile *>(node);
-#endif
+		for (const auto &pair : pageResult.getPairs()) {
+			const uint8_t *source = pair.value.data();
+			auto type = static_cast<FSNodeType>(source[0]);
+			FSNode *node = FSNode::create(type);
+			node->deserialize(&source);
 
-		switch (type) {
-		case FSNodeType::kDirectory:
-			gMetadata->dirNodes++;
-			break;
-		case FSNodeType::kSocket:
-		case FSNodeType::kFifo:
-		case FSNodeType::kBlockDev:
-		case FSNodeType::kCharDev:
-			// Nothing extra to do
-			break;
-		case FSNodeType::kSymlink:
-			gMetadata->linkNodes++;
-			break;
-		case FSNodeType::kFile:
-		case FSNodeType::kTrash:
-		case FSNodeType::kReserved:
-#ifndef METARESTORE
-			for (const auto &sessionId : nodeFile->sessionIds) {
-				matoclserv_add_open_file(sessionId, node->id);
+			int8_t status = loadNode(node);
+
+			if (status < 0) {
+				safs::log_err("Error loading node: {}", node->id);
+				return kOpFailure;
 			}
-#endif
-			fsnodes_quota_update(node, {{QuotaResource::kSize, +fsnodes_get_size(node)}});
-			gMetadata->fileNodes++;
-			break;
-		default:
-			safs::log_err("loading node: unrecognized node type: {}", static_cast<char>(type));
-			fsnodes_quota_update(node, {{QuotaResource::kInodes, +1}});
-			return kOpFailure;
 		}
 
-		safs::log_info("Add node: {}", node->id);
+		if (!pageResult.hasMore() || pageResult.getPairs().empty()) { break; }
 
-		gMetadata->addNode(node, true);
-		gMetadata->inodePool.markAsAcquired(node->id);
-		gMetadata->nodes++;
-		fsnodes_quota_update(node, {{QuotaResource::kInodes, +1}});
+		kv::Key lastKey = pageResult.getPairs().back().key;
+		startSelector = kv::KeySelector(lastKey, false, 0);
 	}
+
+	return kOpSuccess;
+}
+
+int8_t MetadataBackendFDB::loadNode(FSNode *node) {
+#ifndef METARESTORE
+	auto *nodeFile = static_cast<FSNodeFile *>(node);
+#endif
+
+	switch (node->type) {
+	case FSNodeType::kDirectory:
+		gMetadata->dirNodes++;
+		break;
+	case FSNodeType::kSocket:
+	case FSNodeType::kFifo:
+	case FSNodeType::kBlockDev:
+	case FSNodeType::kCharDev:
+		// Nothing extra to do
+		break;
+	case FSNodeType::kSymlink:
+		gMetadata->linkNodes++;
+		break;
+	case FSNodeType::kFile:
+	case FSNodeType::kTrash:
+	case FSNodeType::kReserved:
+#ifndef METARESTORE
+		for (const auto &sessionId : nodeFile->sessionIds) {
+			matoclserv_add_open_file(sessionId, node->id);
+		}
+#endif
+		fsnodes_quota_update(node, {{QuotaResource::kSize, +fsnodes_get_size(node)}});
+		gMetadata->fileNodes++;
+		break;
+	default:
+		safs::log_err("loading node: unrecognized node type: {}", static_cast<char>(node->type));
+		fsnodes_quota_update(node, {{QuotaResource::kInodes, +1}});
+		return kOpFailure;
+	}
+
+	safs::log_info("Add node: {}", node->id);
+
+	gMetadata->addNode(node, true);
+	gMetadata->inodePool.markAsAcquired(node->id);
+	gMetadata->nodes++;
+	fsnodes_quota_update(node, {{QuotaResource::kInodes, +1}});
 
 	return kOpSuccess;
 }
@@ -193,36 +213,43 @@ int8_t MetadataBackendFDB::loadEdges(bool ignoreFlag) {
 	kv::KeySelector startSelector(kv::Key(iniKey.begin(), iniKey.end()), true, 0);
 	kv::KeySelector endSelector(kv::Key(endKey.begin(), endKey.end()), true, 0);
 
-	// TODO(Guillex): use the pagination
-	auto rangeResult = transaction->getRange(startSelector, endSelector, 1000);
+	loadEdge(0, 0, "init", true, true);
 
 	inode_t parentId{};
 	inode_t childId{};
 	std::string edgeName{};
 
-	loadEdge(0, 0, "init", true, true);
-
 	int8_t status = kOpSuccess;
+	static constexpr size_t kEdgePageSize = 1000;  // Number of entries to fetch per page
 
-	for (const auto &pair : rangeResult.getPairs()) {
-		const uint8_t *source = pair.key.data();
-		source += 5;  // Skip "EDGE_"
-		getINode(&source, parentId);
-		getINode(&source, childId);
+	while (true) {
+		auto pageResult = transaction->getRange(startSelector, endSelector, kEdgePageSize);
 
-		source = pair.value.data();
-		edgeName = std::string(reinterpret_cast<const char *>(source), pair.value.size());
+		for (const auto &pair : pageResult.getPairs()) {
+			const uint8_t *source = pair.key.data();
+			source += 5;  // Skip "EDGE_"
+			getINode(&source, parentId);
+			getINode(&source, childId);
 
-		// Process the edge
-		safs::log_info("Inserting edge: {} -> {} : {}", parentId, childId, edgeName);
-		status = loadEdge(parentId, childId, edgeName, ignoreFlag, false);
+			source = pair.value.data();
+			edgeName = std::string(reinterpret_cast<const char *>(source), pair.value.size());
 
-		if (status < 0) {
-			safs::log_err("Error loading edge: {} -> {} : {}", parentId, childId, edgeName);
-			return kOpFailure;
+			// Process the edge
+			safs::log_info("Inserting edge: {} -> {} : {}", parentId, childId, edgeName);
+			status = loadEdge(parentId, childId, edgeName, ignoreFlag, false);
+
+			if (status < 0) {
+				safs::log_err("Error loading edge: {} -> {} : {}", parentId, childId, edgeName);
+				return kOpFailure;
+			}
+
+			safs::log_info("Edge parsed {} -> {} : {}", parentId, childId, edgeName);
 		}
 
-		safs::log_info("Edge parsed {} -> {} : {}", parentId, childId, edgeName);
+		if (!pageResult.hasMore() || pageResult.getPairs().empty()) { break; }
+
+		kv::Key lastKey = pageResult.getPairs().back().key;
+		startSelector = kv::KeySelector(lastKey, false, 0);
 	}
 
 	return kOpSuccess;
@@ -357,22 +384,30 @@ int8_t MetadataBackendFDB::loadFree(bool ignoreFlag) {
 	kv::KeySelector startSelector(kv::Key(iniKey.begin(), iniKey.end()), true, 0);
 	kv::KeySelector endSelector(kv::Key(endKey.begin(), endKey.end()), true, 0);
 
-	// TODO(Guillex): use the pagination
-	auto rangeResult = transaction->getRange(startSelector, endSelector, 1000);
+	static constexpr size_t kFreePageSize = 1000;  // Number of entries to fetch per page
 
-	inode_t inode{};
-	uint32_t timeStamp{};
+	while (true) {
+		auto pageResult = transaction->getRange(startSelector, endSelector, kFreePageSize);
 
-	for (const auto &pair : rangeResult.getPairs()) {
-		const uint8_t *source = pair.key.data();
-		source += 5;  // Skip "FREE_"
-		getINode(&source, inode);
+		inode_t inode{};
+		uint32_t timeStamp{};
 
-		source = pair.value.data();
-		get32bit(&source, timeStamp);
+		for (const auto &pair : pageResult.getPairs()) {
+			const uint8_t *source = pair.key.data();
+			source += 5;  // Skip "FREE_"
+			getINode(&source, inode);
 
-		safs::log_info("Inserting FREE: {} -> {}", inode, timeStamp);
-		gMetadata->inodePool.detain(inode, timeStamp, true);
+			source = pair.value.data();
+			get32bit(&source, timeStamp);
+
+			safs::log_info("Inserting FREE: {} -> {}", inode, timeStamp);
+			gMetadata->inodePool.detain(inode, timeStamp, true);
+		}
+
+		if (!pageResult.hasMore() || pageResult.getPairs().empty()) { break; }
+
+		kv::Key lastKey = pageResult.getPairs().back().key;
+		startSelector = kv::KeySelector(lastKey, false, 0);
 	}
 
 	// Connect the signal handlers after initial loading
@@ -434,29 +469,40 @@ int8_t MetadataBackendFDB::loadChunks(bool ignoreFlag) {
 	kv::KeySelector startSelector(kv::Key(iniKey.begin(), iniKey.end()), true, 0);
 	kv::KeySelector endSelector(kv::Key(endKey.begin(), endKey.end()), true, 0);
 
-	// TODO(Guillex): use the pagination
-	auto rangeResult = transaction->getRange(startSelector, endSelector, 1000);
+	kv::Key lastKey;
+	static constexpr size_t kChunkPageSize = 1000;  // Number of entries to fetch per page
 
-	uint64_t chunkId{};
-	uint32_t chunkVersion{};
-	uint32_t lockedTo{};
-	uint32_t lockId{};
+	while (true) {
+		auto pageResult = transaction->getRange(startSelector, endSelector, kChunkPageSize);
 
-	for (const auto &pair : rangeResult.getPairs()) {
-		const uint8_t *source = pair.key.data();
-		source += 5;  // Skip "CHNK_"
-		chunkId = get64bit(&source);
-		get32bit(&source, chunkVersion);
+		uint64_t chunkId{};
+		uint32_t chunkVersion{};
+		uint32_t lockedTo{};
+		uint32_t lockId{};
 
-		source = pair.value.data();
-		get32bit(&source, lockedTo);
-		get32bit(&source, lockId);
+		for (const auto &pair : pageResult.getPairs()) {
+			const uint8_t *source = pair.key.data();
+			source += 5;  // Skip "CHNK_"
+			chunkId = get64bit(&source);
+			get32bit(&source, chunkVersion);
 
-		if (chunkId > 0) {
-			chunk_add_from_initial_metadata_load(chunkId, chunkVersion, lockedTo, lockId);
-			safs::log_info("Loaded chunk: {} -> {} (lockedto: {}, lockid: {})",
-			              chunkId, chunkVersion, lockedTo, lockId);
+			source = pair.value.data();
+			get32bit(&source, lockedTo);
+			get32bit(&source, lockId);
+
+			if (chunkId > 0) {
+				chunk_add_from_initial_metadata_load(chunkId, chunkVersion, lockedTo, lockId);
+				safs::log_info("Loaded chunk: {} -> {} (lockedto: {}, lockid: {})", chunkId,
+				               chunkVersion, lockedTo, lockId);
+			}
 		}
+
+		if (!pageResult.hasMore() || pageResult.getPairs().empty()) {
+			break;
+		}
+
+		lastKey = pageResult.getPairs().back().key;
+		startSelector = kv::KeySelector(lastKey, false, 0);
 	}
 
 	// Connect the signal handlers after initial loading

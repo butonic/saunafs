@@ -105,6 +105,7 @@ private:
 
 	/// Loads NODE_ metadata
 	int8_t loadNodes(bool ignoreFlag);
+	int8_t loadNode(FSNode *node);
 
 	int8_t loadEdges(bool ignoreFlag);
 	int8_t loadEdge(inode_t parentId, inode_t childId, const std::string &name, bool ignoreFlag,
