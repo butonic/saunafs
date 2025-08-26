@@ -123,6 +123,7 @@ uint8_t fs_mknod(const FsContext &context, inode_t parent, const HString &name, 
                  uint16_t mode, uint16_t umask, uint32_t rdev, inode_t *inode, Attributes &attr);
 uint8_t fs_mkdir(const FsContext &context, inode_t parent, const HString &name, uint16_t mode,
                  uint16_t umask, uint8_t copysgid, inode_t *inode, Attributes &attr);
+uint8_t fs_remove_chunk_from_file(const FsContext &context, inode_t inode, uint64_t chunkId);
 uint8_t fs_repair(const FsContext &context, inode_t inode, uint8_t correct_only,
                   uint32_t *notchanged, uint32_t *erased, uint32_t *repaired);
 uint8_t fs_rmdir(const FsContext &context, inode_t parent, const HString &name);
@@ -181,6 +182,7 @@ uint8_t fs_apply_session(uint32_t sessionid);
 uint8_t fs_apply_freeinodes(uint32_t ts, inode_t freeinodes);
 uint8_t fs_apply_incversion(uint64_t chunkid);
 uint8_t fs_apply_length(uint32_t ts, inode_t inode, uint64_t length, bool eraseFurtherChunks);
+uint8_t fs_apply_remove_chunk_from_file(uint32_t ts, inode_t inode, uint64_t chunkId);
 uint8_t fs_apply_repair(uint32_t ts, inode_t inode, uint32_t indx, uint32_t nversion);
 uint8_t fs_apply_setxattr(uint32_t ts, inode_t inode, uint32_t anleng, const uint8_t *attrname,
                           uint32_t avleng, const uint8_t *attrvalue, uint32_t mode);

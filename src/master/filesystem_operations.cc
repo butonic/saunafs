@@ -2159,6 +2159,90 @@ uint8_t fs_apply_incversion(uint64_t chunkid) {
 }
 
 #ifndef METARESTORE
+uint8_t fs_remove_chunk_from_file(const FsContext &context, inode_t inode, uint64_t chunkId) {
+	uint32_t ts = eventloop_time();
+	ChecksumUpdater cu(ts);
+	uint32_t indx;
+	StatsRecord psr, nsr;
+	FSNode *p;
+
+	if (chunkId == 0) { return SAUNAFS_ERROR_NOCHUNK; }
+
+	uint8_t status = verify_session(context, OperationMode::kReadWrite, SessionType::kAny);
+	if (status != SAUNAFS_STATUS_OK) { return status; }
+
+	status =
+	    fsnodes_get_node_for_operation(context, ExpectedNodeType::kFile, MODE_MASK_W, inode, &p);
+	if (status != SAUNAFS_STATUS_OK) { return status; }
+
+	auto *node_file = static_cast<FSNodeFile *>(p);
+	fsnodes_get_stats(p, &psr);
+	for (indx = 0; indx < node_file->chunks.size(); indx++) {
+		if (node_file->chunks[indx] == chunkId) { break; }
+	}
+
+	// not found
+	if (indx == node_file->chunks.size()) { return SAUNAFS_ERROR_NOCHUNK; }
+
+	status = chunk_delete_file(chunkId, p->goal);
+	node_file->chunks[indx] = 0;
+	p->mtime = ts;
+	fsnodes_update_ctime(p, ts);
+	if (status != SAUNAFS_STATUS_OK) { return status; }
+
+	fs_changelog(ts, "REMOVE(%" PRIiNode ",%" PRIu64 ")", inode, chunkId);
+
+	fsnodes_get_stats(p, &nsr);
+	for (const auto &[parentId, _] : p->parents) {
+		FSNodeDirectory *parent = fsnodes_id_to_node_verify<FSNodeDirectory>(parentId);
+		fsnodes_add_sub_stats(parent, &nsr, &psr);
+	}
+	fsnodes_quota_update(p, {{QuotaResource::kSize, nsr.size - psr.size}});
+	fsnodes_update_checksum(p);
+	return SAUNAFS_STATUS_OK;
+}
+#endif /* #ifndef METARESTORE */
+
+uint8_t fs_apply_remove_chunk_from_file(uint32_t ts, inode_t inode, uint64_t chunkId) {
+	FSNodeFile *p;
+	uint8_t status;
+	uint32_t indx;
+	StatsRecord psr, nsr;
+
+	if (chunkId == 0) { return SAUNAFS_ERROR_NOCHUNK; }
+
+	p = fsnodes_id_to_node<FSNodeFile>(inode);
+	if (!p) { return SAUNAFS_ERROR_ENOENT; }
+	if (p->type != FSNodeType::kFile && p->type != FSNodeType::kTrash &&
+	    p->type != FSNodeType::kReserved) {
+		return SAUNAFS_ERROR_EPERM;
+	}
+	fsnodes_get_stats(p, &psr);
+	for (indx = 0; indx < p->chunks.size(); indx++) {
+		if (p->chunks[indx] == chunkId) { break; }
+	}
+
+	// not found
+	if (indx == p->chunks.size()) { return SAUNAFS_ERROR_NOCHUNK; }
+
+	status = chunk_delete_file(p->chunks[indx], p->goal);
+	p->chunks[indx] = 0;
+	fsnodes_get_stats(p, &nsr);
+
+	for (const auto &[parentId, _] : p->parents) {
+		auto *parent = fsnodes_id_to_node_verify<FSNodeDirectory>(parentId);
+		fsnodes_add_sub_stats(parent, &nsr, &psr);
+	}
+	fsnodes_quota_update(p, {{QuotaResource::kSize, nsr.size - psr.size}});
+
+	gMetadata->metadataVersion++;
+	p->mtime = ts;
+	fsnodes_update_ctime(p, ts);
+	fsnodes_update_checksum(p);
+	return status;
+}
+
+#ifndef METARESTORE
 uint8_t fs_repair(const FsContext &context, inode_t inode,
 		uint8_t correct_only, uint32_t *notchanged, uint32_t *erased, uint32_t *repaired) {
 	uint32_t ts = eventloop_time();

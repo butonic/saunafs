@@ -492,6 +492,17 @@ int do_release(const char* filename, uint64_t lv, uint32_t ts, const char* ptr) 
 	return fs_release(FsContext::getForRestore(ts), inode, cuid);
 }
 
+int do_remove_chunk_from_file(const char *filename, uint64_t lv, uint32_t ts, const char *ptr) {
+	inode_t inode;
+	uint64_t chunkId;
+	EAT(ptr, filename, lv, '(');
+	GETINODE(inode, ptr);
+	EAT(ptr, filename, lv, ',');
+	GETU64(chunkId, ptr);
+	EAT(ptr, filename, lv, ')');
+	return fs_apply_remove_chunk_from_file(ts, inode, chunkId);
+}
+
 int do_repair(const char* filename, uint64_t lv, uint32_t ts, const char* ptr) {
 	inode_t inode;
 	uint32_t indx;
@@ -909,6 +920,8 @@ int restore_line(const char* filename, uint64_t lv, const char* line) {
 				status = do_repair(filename,lv,ts,ptr+6);
 			} else if (strncmp(ptr,"RMPLOCK",7)==0) {
 				status = do_remove_pending_op(filename,lv,ts,ptr+7);
+			} else if (strncmp(ptr, "REMOVE", 6) == 0) {
+				status = do_remove_chunk_from_file(filename, lv, ts, ptr + 6);
 			}
 			break;
 		case 'S':
